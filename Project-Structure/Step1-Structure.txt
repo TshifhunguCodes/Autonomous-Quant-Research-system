@@ -1,0 +1,21 @@
+XAUUSD M5 + H1 data from MT5
+→ cleans it
+→ adds features
+→ stores ready for strategy logic
+AI CHECK DATA LEARN AND PROVIDE GOOD SIGNALS
+
+
+quant_system/
+│
+├── agents/
+│   ├── data_agent.py
+│   ├── cleaning_agent.py
+│   ├── feature_agent.py
+│
+├── data/
+│   ├── raw/
+│   ├── clean/
+│   ├── features/
+│
+├── main.py
+└── requirements.txt
