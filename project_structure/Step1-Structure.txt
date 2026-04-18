@@ -19,3 +19,23 @@ quant_system/
 │
 ├── main.py
 └── requirements.txt
+|
+|
+|---strategy/
+|   |-- strucuture_agent.py
+|   |-- zone_agent.py
+|   |-- market_state_agent.py
+|   |-- signal_agent.py
+|   |-- risk_engine.py
+|   |-- setup_engine.py
+|
+|
+|
+|
+|
+|
+|
+|
+|
+|
+|
