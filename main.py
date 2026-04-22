@@ -1,4 +1,5 @@
 import argparse
+from dataclasses import replace
 
 from core.config import ensure_runtime_dirs, load_config
 from core.logging_utils import configure_logging, get_logger
@@ -146,12 +147,19 @@ def main():
         )
         return
 
-    run_live(
-        config,
-        refresh_data=args.refresh_data,
-        reuse_artifacts=args.reuse_artifacts,
-        execute=args.execute_live,
-    )
+    # Multi-Symbol Refactor: Support portfolio-level iteration
+    portfolio = getattr(config, "portfolio", [config.market.symbol])
+    for symbol in portfolio:
+        # Create a new config context for this symbol because the dataclass is frozen
+        symbol_config = replace(config, market=replace(config.market, symbol=symbol))
+
+        logger.info("Processing symbol=%s in live mode", symbol)
+        run_live(
+            symbol_config,
+            refresh_data=args.refresh_data,
+            reuse_artifacts=args.reuse_artifacts,
+            execute=args.execute_live,
+        )
 
 
 if __name__ == "__main__":

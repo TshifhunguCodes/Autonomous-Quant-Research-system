@@ -37,7 +37,60 @@ quant_system/
 |
 |
 |
-TO VIEW SUMMARY, BACKTESTING, LIVE MODE 
+python main.py --mode backtest --refresh-data
+python main.py --mode live --execute-live
+python main.py --mode summary --reuse-artifacts
+
+Summary Table for Quick Reference
+Core Workflows Summary
+Iteration (Fastest): Use python main.py --mode summary --reuse-artifacts. This is your "tweak and check" command. It skips data fetching and feature calculation, running only the backtester on existing data to give you an immediate PnL summary.
+Validation (Deep Dive): Use python main.py --mode backtest --refresh-data. Use this after making structural changes to your indicators or to sync with the latest market data. Follow up with python main.py --mode stress --stress-random-runs 10 to ensure your strategy isn't "curve-fitted" to a specific time period.
+Production (Live):
+Preview: python main.py --mode live checks for a signal without taking a trade.
+Execute: python main.py --mode live --execute-live is the active trading command that enforces safety filters (spread, score, state) before sending orders to MT5.
+Replay (Debugging): Use python main.py --mode replay --replay-start "YYYY-MM-DD". This is essential for "forensic" analysis of specific losses or unusual market behavior.
+Efficiency Tips
+Reduce Log Noise: Use --log-level WARNING during long backtests to prevent the console from being overwhelmed.
+Portfolio Power: Your recent refactor means that in live mode, the system will automatically cycle through all symbols listed in your portfolio configuration.
+Continuous Execution: Until a native loop is implemented in the Python code, you can keep the bot running every 5 minutes using shell loops:
+PowerShell: while($true) { python main.py --mode live --execute-live; sleep 300 }
+Command Prompt: for /l %g in () do (python main.py --mode live --execute-live & timeout /t 300)
+This structure ensures you spend less time waiting for data and more time refining the "Elite" logic of your strategy.
+
+Goal	Command
+Check Stats Quickly	python main.py --mode summary --reuse-artifacts
+Fresh Start	python main.py --mode backtest --refresh-data
+Trade Gold Live	python main.py --mode live --execute-live
+Verify Stability	python main.py --mode stress
+Debug a Bad Day	python main.py --mode replay --replay-start "YYYY-MM-DD"
+TO VIEW SUMMARY, BACKTESTING, LIVE MODE
+So the current behavior is:
+
+python main.py
+python main.py --mode summary --reuse-artifacts
+Runs research once and exits.
+
+python main.py --mode backtest
+Runs the pipeline/backtest once and exits.
+
+python main.py --mode live
+Checks the latest setup once and exits.
+
+python main.py --mode live --execute-live
+If allowed and valid, it can place one live order check/send pass, then exits.
+
+The replay engine is in strategy/replay_engine.py (line 1) and it now runs through historical candles one by one, updates open trades first, 
+python main.py --mode replay
+python main.py --mode replay --replay-start 2026-04-01 --replay-end 2026-04-22
+python main.py --mode replay --replay-max-candles 250
+
+Built the stress-testing layer on top of the replay engine.
+python main.py --mode stress
+python main.py --mode stress --stress-random-runs 6 --stress-window-days 5 --stress-seed 42
+
+
+
+
 1.  python main.py --mode backtest
 2.  python main.py --mode summary
 3.  python main.py --live mode  

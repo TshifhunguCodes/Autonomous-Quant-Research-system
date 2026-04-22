@@ -10,6 +10,37 @@ def _build_trade(row, config, equity):
     if not bool(row.get("trade_allowed", True)):
         return None
 
+    # --- HARD TRUTH FILTERS ---
+    # 1. Elite Paradox: Reject scores indicating move exhaustion (> 100)
+    if float(row.get("confirm_score", 0)) > 100:
+        return None
+
+    # 2. Market State Filter: Reject CHOPPY noise.
+    if row.get("market_state") == "CHOPPY":
+        return None
+
+    # 3. High Conviction Filter: Strict H1 Timeframe Alignment
+    if int(row.get("h1_alignment", 0)) != 1:
+        return None
+
+    # 4. Volatile Sniper Filter: Strict conditions for high volatility
+    if row.get("market_state") == "VOLATILE":
+        # Only ELITE quality allowed in high volatility
+        if row.get("quality") != "ELITE":
+            return None
+        # Must be at a MAJOR zone to provide a "Risk-Free" anchor from wicks
+        if not (bool(row.get("major_support", 0)) or bool(row.get("major_resistance", 0))):
+            return None
+    elif row.get("quality") not in ["ELITE", "HIGH"] or (row.get("quality") == "HIGH" and row.get("market_state") != "RANGING"):
+        return None # RANGING allows HIGH, others require ELITE
+
+    # 5. Dynamic Conviction Floor: 65 Ranging, 75 Trending, 85 Volatile
+    state = row.get("market_state")
+    score_floor = 65 if state == "RANGING" else (85 if state == "VOLATILE" else 75)
+    
+    if float(row.get("confirm_score", 0)) < score_floor:
+        return None
+
     signal = row["confirmed_signal"]
     spread_price = float(row.get("spread", 0) or 0) * config.market.point_size
     slippage_price = config.backtest.slippage_points * config.market.point_size
@@ -54,27 +85,40 @@ def _build_trade(row, config, equity):
         "confirm_score": row.get("confirm_score", 0),
     }
 
-
 def _resolve_trade(trade, candle):
+    """
+    Resolves a trade and manages Break-Even logic.
+    Returns (Outcome, ExitPrice, was_be_stop)
+    """
     high = float(candle["high"])
     low = float(candle["low"])
+    
+    # 1. Update Break-Even status
+    # Move SL to entry if price hits 1.5R Risk/Reward. 
+    # Gold needs more room (1.5R) to avoid being wicked out at BE before the TP.
+    if not trade.get("is_be", False):
+        if trade["side"] == "buy" and high >= (trade["executed_entry"] + (trade["risk_distance"] * 1.5)):
+            trade["stop_loss"] = trade["executed_entry"]
+            trade["is_be"] = True
+        elif trade["side"] == "sell" and low <= (trade["executed_entry"] - (trade["risk_distance"] * 1.5)):
+            trade["stop_loss"] = trade["executed_entry"]
+            trade["is_be"] = True
 
     if trade["side"] == "buy":
-        if low <= trade["stop_loss"] and high >= trade["take_profit"]:
-            return "LOSS", trade["stop_loss"]
         if low <= trade["stop_loss"]:
-            return "LOSS", trade["stop_loss"]
+            # If is_be is true, this is a BE exit, not a full LOSS
+            outcome = "BE" if trade.get("is_be", False) else "LOSS"
+            return outcome, trade["stop_loss"], trade.get("is_be", False)
         if high >= trade["take_profit"]:
-            return "WIN", trade["take_profit"]
+            return "WIN", trade["take_profit"], False
     else:
-        if high >= trade["stop_loss"] and low <= trade["take_profit"]:
-            return "LOSS", trade["stop_loss"]
         if high >= trade["stop_loss"]:
-            return "LOSS", trade["stop_loss"]
+            outcome = "BE" if trade.get("is_be", False) else "LOSS"
+            return outcome, trade["stop_loss"], trade.get("is_be", False)
         if low <= trade["take_profit"]:
-            return "WIN", trade["take_profit"]
+            return "WIN", trade["take_profit"], False
 
-    return None, None
+    return None, None, False
 
 
 def _empty_trades_frame():
@@ -101,6 +145,7 @@ def _empty_trades_frame():
             "exit_time",
             "exit_price",
             "result",
+            "reentry_count",
             "pnl",
             "equity_after_trade",
         ]
@@ -109,7 +154,7 @@ def _empty_trades_frame():
 
 def _build_summary(trades_df, config, ending_balance, max_drawdown_pct, skipped_overlap, label):
     closed_trades = (
-        trades_df[trades_df["result"].isin(["WIN", "LOSS"])]
+        trades_df[trades_df["result"].isin(["WIN", "LOSS", "BE"])]
         if not trades_df.empty
         else pd.DataFrame()
     )
@@ -131,6 +176,12 @@ def _build_summary(trades_df, config, ending_balance, max_drawdown_pct, skipped_
         if len(closed_trades)
         else 0.0
     )
+    # True Win Rate: Accuracy of the signal itself (excluding BE scratches)
+    true_win_rate = (
+        round((wins / (wins + losses)) * 100, 2)
+        if (wins + losses) > 0
+        else 0.0
+    )
 
     return pd.DataFrame(
         [
@@ -144,6 +195,7 @@ def _build_summary(trades_df, config, ending_balance, max_drawdown_pct, skipped_
                 "losses": losses,
                 "open_trades": int((trades_df["result"] == "OPEN").sum()) if not trades_df.empty else 0,
                 "win_rate_pct": win_rate,
+                "true_win_rate_pct": true_win_rate,
                 "profit_factor": profit_factor,
                 "max_drawdown_pct": round(max_drawdown_pct, 2),
                 "skipped_overlap_signals": skipped_overlap,
@@ -161,13 +213,15 @@ def run_backtest_frame(df, config, label="full_period"):
     active_trades = []
     trade_records = []
     skipped_overlap = 0
+    reentry_candidates = [] 
+    signal_entry_counts = {} # signal_time -> count
 
     for _, row in df.iterrows():
         current_time = row["time"]
 
         next_active_trades = []
         for active_trade in active_trades:
-            outcome, exit_price = _resolve_trade(active_trade, row)
+            outcome, exit_price, was_be_stop = _resolve_trade(active_trade, row)
             if outcome:
                 if outcome == "WIN":
                     r_multiple = (
@@ -178,6 +232,8 @@ def run_backtest_frame(df, config, label="full_period"):
                         active_trade["risk_amount"] * r_multiple
                         - config.backtest.commission_per_trade
                     )
+                elif outcome == "BE":
+                    pnl = -config.backtest.commission_per_trade # Preserve capital
                 else:
                     pnl = (
                         -active_trade["risk_amount"]
@@ -190,11 +246,16 @@ def run_backtest_frame(df, config, label="full_period"):
                     drawdown_pct = ((peak_equity - equity) / peak_equity) * 100
                     max_drawdown_pct = max(max_drawdown_pct, drawdown_pct)
 
+                # Only allow re-entry if the market isn't CHOPPY
+                if was_be_stop and row["market_state"] != "CHOPPY":
+                    reentry_candidates.append(active_trade)
+
                 trade_records.append(
                     {
                         **active_trade,
                         "exit_time": current_time,
                         "exit_price": exit_price,
+                        "reentry_count": signal_entry_counts.get(active_trade["signal_time"], 1),
                         "result": outcome,
                         "pnl": round(pnl, 2),
                         "equity_after_trade": round(equity, 2),
@@ -204,6 +265,30 @@ def run_backtest_frame(df, config, label="full_period"):
                 next_active_trades.append(active_trade)
 
         active_trades = next_active_trades
+
+        # --- RE-ENTRY LOGIC ---
+        # Check if price has reclaimed original entry after a BE stop
+        still_watching_reentry = []
+        for candidate in reentry_candidates:
+            reentry_triggered = False
+            if candidate["side"] == "buy" and float(row["close"]) > candidate["executed_entry"]:
+                reentry_triggered = True
+            elif candidate["side"] == "sell" and float(row["close"]) < candidate["executed_entry"]:
+                reentry_triggered = True
+            
+            # Only allow ONE re-entry per signal and ONLY for ELITE quality.
+            # Re-entering MEDIUM trades often leads to the 30% win-rate drawdowns you saw.
+            sig_id = candidate["signal_time"]
+            if reentry_triggered and signal_entry_counts.get(sig_id, 1) < 2 and candidate["quality"] == "ELITE":
+                # Create a fresh copy for the re-entry
+                new_trade = candidate.copy()
+                new_trade["is_be"] = False # Reset BE status
+                new_trade["signal_label"] += "_REENTRY"
+                signal_entry_counts[sig_id] = 2
+                active_trades.append(new_trade)
+            else:
+                still_watching_reentry.append(candidate)
+        reentry_candidates = still_watching_reentry
 
         if (
             active_trades
@@ -215,6 +300,7 @@ def run_backtest_frame(df, config, label="full_period"):
 
         if row["confirmed_signal"] not in {"buy", "sell"}:
             continue
+        signal_entry_counts[row["time"]] = 1
 
         candidate_trade = _build_trade(row, config, equity)
         if candidate_trade is None:

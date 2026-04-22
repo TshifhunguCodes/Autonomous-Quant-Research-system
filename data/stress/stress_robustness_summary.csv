@@ -1,2 +1,2 @@
 slice_count,profitable_slice_ratio,positive_expectancy_ratio,consistency_score,avg_drawdown_pct,drawdown_std_pct,drawdown_stability_score,expectancy_mean,expectancy_std,expectancy_p10,expectancy_p50,expectancy_p90
-210,0.4095,0.4095,0.4095,0.61,0.93,0.0,23.74,64.33,-29.08,0.0,156.01
+212,0.3821,0.3821,0.3821,0.71,1.14,0.0,23.89,75.33,-87.5,0.0,159.43

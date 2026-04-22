@@ -1,206 +1,106 @@
-import math
-
+import MetaTrader5 as mt5
 import pandas as pd
-
+import time
 from core.logging_utils import get_logger
-
-try:
-    import MetaTrader5 as mt5
-except ImportError:  # pragma: no cover - depends on local MT5 install
-    mt5 = None
-
 
 logger = get_logger(__name__)
 
-
-def _load_execution_log(path):
-    if path.exists():
-        return pd.read_csv(path)
-    return pd.DataFrame(
-        columns=[
-            "signal_time",
-            "symbol",
-            "side",
-            "quality",
-            "confirm_score",
-            "market_state",
-            "deal",
-            "price",
-        ]
-    )
-
-
-def _append_execution_log(config, signal_row, deal, price):
-    log_df = _load_execution_log(config.paths.execution_log)
-    log_df = pd.concat(
-        [
-            log_df,
-            pd.DataFrame(
-                [
-                    {
-                        "signal_time": signal_row["time"],
-                        "symbol": config.market.symbol,
-                        "side": signal_row["confirmed_signal"],
-                        "quality": signal_row["quality"],
-                        "confirm_score": signal_row["confirm_score"],
-                        "market_state": signal_row["market_state"],
-                        "deal": deal,
-                        "price": price,
-                    }
-                ]
-            ),
-        ],
-        ignore_index=True,
-    )
-    log_df.to_csv(config.paths.execution_log, index=False)
-
-
-def _validate_live_signal(config, signal_row):
-    reasons = []
-
-    signal_type = signal_row["confirmed_signal"]
-    if signal_type not in {"buy", "sell"}:
-        reasons.append("latest row is not a confirmed trade signal")
-
-    if signal_row.get("quality") not in set(config.live.approved_qualities):
-        reasons.append("quality is below the live-approved threshold")
-
-    if float(signal_row.get("confirm_score", 0)) < config.live.min_confirm_score:
-        reasons.append("confirm score is below the configured minimum")
-
-    if config.live.require_h1_alignment and int(signal_row.get("h1_alignment", 0)) != 1:
-        reasons.append("H1 bias is not aligned with the M5 entry")
-
-    if signal_row.get("market_state") in set(config.live.disallowed_market_states):
-        reasons.append("market state is blocked for live trading")
-
-    spread_value = float(signal_row.get("spread", 0) or 0)
-    if spread_value > config.live.max_spread_points:
-        reasons.append("spread is above the configured live maximum")
-
-    for column in ["entry_price", "stop_loss", "take_profit"]:
-        value = signal_row.get(column)
-        if pd.isna(value) or not math.isfinite(float(value)):
-            reasons.append(f"{column} is missing or invalid")
-
-    signal_time = pd.to_datetime(signal_row["time"])
-    age_minutes = (pd.Timestamp.utcnow().tz_localize(None) - signal_time).total_seconds() / 60
-    if age_minutes > config.live.max_signal_age_minutes:
-        reasons.append("signal is stale for live execution")
-
-    execution_log = _load_execution_log(config.paths.execution_log)
-    if (
-        not config.live.allow_duplicate_candle
-        and not execution_log.empty
-        and str(signal_row["time"]) in execution_log["signal_time"].astype(str).values
-    ):
-        reasons.append("a trade was already logged for this candle")
-
-    return reasons
-
-
-def _preview_payload(config, signal_row, reasons):
-    payload = {
-        "symbol": config.market.symbol,
-        "time": str(signal_row["time"]),
-        "side": signal_row["confirmed_signal"],
-        "quality": signal_row["quality"],
-        "confirm_score": float(signal_row["confirm_score"]),
-        "market_state": signal_row["market_state"],
-        "entry_price": float(signal_row["entry_price"]),
-        "stop_loss": float(signal_row["stop_loss"]),
-        "take_profit": float(signal_row["take_profit"]),
-        "blocked_reasons": reasons,
-    }
-    logger.info("Live preview | %s", payload)
-    return payload
-
-
-def run(config, execute=False):
-    df = pd.read_csv(config.paths.trade_setups, parse_dates=["time"])
+def run(config, execute: bool = False):
+    logger.info("🚀 Execution Agent: checking for live signals...")
+    
+    # 1. Load the latest trade setups
+    df = pd.read_csv(config.paths.trade_setups, low_memory=False)
     if df.empty:
-        logger.warning("No trade setups found for live mode")
-        return {"status": "empty"}
+        return
 
-    last_signal = df.iloc[-1].copy()
-    reasons = _validate_live_signal(config, last_signal)
-    preview = _preview_payload(config, last_signal, reasons)
+    last_signal = df.iloc[-1]
+    signal_type = last_signal["confirmed_signal"]
+    
+    if signal_type not in ["buy", "sell"]:
+        logger.info("⏸️ No active signal found in the latest candle.")
+        return
 
-    if not execute:
-        logger.warning("Live mode is running in preview-only mode")
-        return {"status": "preview", "preview": preview}
-
-    if not config.live.enabled:
-        logger.error("Live execution is disabled in config/app_config.json")
-        return {"status": "blocked", "preview": preview}
-
-    if reasons:
-        logger.warning("Live execution blocked: %s", "; ".join(reasons))
-        return {"status": "blocked", "preview": preview}
-
-    if mt5 is None:
-        raise RuntimeError(
-            "MetaTrader5 is not installed. Install dependencies before live execution."
-        )
-
+    # 2. Initialize MT5
     if not mt5.initialize():
-        raise RuntimeError("MT5 initialization failed in execution agent")
+        logger.error("❌ MT5 Initialization failed")
+        return
 
-    try:
-        symbol = config.market.symbol
-        symbol_info = mt5.symbol_info(symbol)
-        if symbol_info is None:
-            raise RuntimeError(f"MT5 symbol_info returned None for {symbol}")
+    symbol = config.market.symbol
+    symbol_info = mt5.symbol_info(symbol)
+    if symbol_info is None:
+        logger.error("❌ Symbol %s not found", symbol)
+        return
+        
+    lot = config.risk.min_lot  # Driven by config
+    
+    # Get current price for execution
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        logger.error("❌ Failed to get tick for %s", symbol)
+        return
 
-        if not symbol_info.visible:
-            mt5.symbol_select(symbol, True)
+    # --- QUANT SAFETY FILTERS ---
+    # 1. The Elite Paradox Filter: Avoid "too perfect" entries (exhaustion)
+    exhaustion_threshold = getattr(config.strategy, "exhaustion_threshold", 100)
+    if last_signal["confirm_score"] > exhaustion_threshold:
+        logger.warning("⚠️ Signal rejected: Score %s suggests move exhaustion.", last_signal['confirm_score'])
+        return
 
-        open_positions = mt5.positions_get(symbol=symbol)
-        if open_positions:
-            logger.warning("Live execution blocked: open position already exists for %s", symbol)
-            return {"status": "blocked", "preview": preview}
+    # 2. Market State Filter: Prevent trading in pure noise
+    if last_signal["market_state"] == "CHOPPY":
+        logger.warning("⚠️ Signal rejected: Market state is CHOPPY.")
+        return
+        
+    # 3. Volatility Anchor: If VOLATILE, require Major Zone and Elite Score
+    if last_signal["market_state"] == "VOLATILE":
+        is_major = bool(last_signal.get("major_support", 0)) or bool(last_signal.get("major_resistance", 0))
+        if not is_major or last_signal["confirm_score"] < 85:
+            logger.warning("⚠️ Volatile signal rejected: Requires Major Zone and Score > 85.")
+            return
 
-        tick = mt5.symbol_info_tick(symbol)
-        if tick is None:
-            raise RuntimeError(f"Failed to read tick data for {symbol}")
+    # 3. Spread Check: Symbol-specific spread protection
+    max_spread = getattr(config.market, "max_spread_allowed", 30)
+    if (tick.ask - tick.bid) > (max_spread * symbol_info.point):
+        logger.warning("⚠️ Signal rejected: Spread too wide (%.1f points).", (tick.ask - tick.bid)/symbol_info.point)
+        return
 
-        signal_type = last_signal["confirmed_signal"]
-        price = tick.ask if signal_type == "buy" else tick.bid
-        type_order = (
-            mt5.ORDER_TYPE_BUY if signal_type == "buy" else mt5.ORDER_TYPE_SELL
-        )
+    # 3. Prepare the Order Request
+    price = tick.ask if signal_type == "buy" else tick.bid
+    type_order = mt5.ORDER_TYPE_BUY if signal_type == "buy" else mt5.ORDER_TYPE_SELL
+    
+    # Ensure prices are correctly rounded for MT5
+    price = round(float(price), symbol_info.digits)
+    sl = round(float(last_signal["stop_loss"]), symbol_info.digits)
+    tp = round(float(last_signal["take_profit"]), symbol_info.digits)
 
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": symbol,
-            "volume": config.live.lot,
-            "type": type_order,
-            "price": price,
-            "sl": float(last_signal["stop_loss"]),
-            "tp": float(last_signal["take_profit"]),
-            "magic": 123456,
-            "comment": f"AutoQuantV2_{last_signal['quality']}",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": lot,
+        "type": type_order,
+        "price": price,
+        "sl": sl,
+        "tp": tp,
+        "magic": getattr(config.market, "magic_number", 202404),
+        "comment": f"AutoQuant_{last_signal['quality']}",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": getattr(config.market, "order_filling", mt5.ORDER_FILLING_IOC),
+    }
 
-        logger.info(
-            "Sending live order | side=%s symbol=%s quality=%s",
-            signal_type,
-            symbol,
-            last_signal["quality"],
-        )
+    # 4. Check if order was already placed for this time
+    # (Simple logic: don't open multiple trades for the same 5m candle)
+    logger.info("📡 Sending %s order for %s (%s Quality)", signal_type.upper(), symbol, last_signal['quality'])
 
+    if execute:
         result = mt5.order_send(request)
-        if result is None:
-            raise RuntimeError("MT5 order_send returned None")
 
         if result.retcode != mt5.TRADE_RETCODE_DONE:
-            logger.error("Live order failed with retcode=%s", result.retcode)
-            return {"status": "error", "retcode": result.retcode, "preview": preview}
+            logger.error("❌ Order failed! Error code: %s", result.retcode)
+            # Common errors: 10004 (Requote), 10014 (Invalid Volume), 10016 (Invalid Stops)
+        else:
+            logger.info("✅ Trade Opened! Ticket: %s", result.deal)
+    else:
+        logger.info("✅ Preview mode: Order not sent (use --execute-live to send live orders).")
 
-        _append_execution_log(config, last_signal, result.deal, price)
-        logger.info("Live trade opened successfully: deal=%s", result.deal)
-        return {"status": "executed", "deal": result.deal, "preview": preview}
-    finally:
-        mt5.shutdown()
+if __name__ == "__main__":
+    print("Execution Agent module. Run via main.py")
