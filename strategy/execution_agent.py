@@ -31,8 +31,12 @@ def run(config, execute: bool = False):
         logger.error("❌ Symbol %s not found", symbol)
         return
         
-    lot = config.risk.min_lot  # Driven by config
-    
+    # 1. Position Sizing with Volatility Adaptation
+    lot = config.risk.min_lot
+    if last_signal["market_state"] == "VOLATILE":
+        lot = max(0.01, lot * 0.5) # Reduce risk in fast markets
+
+    # 2. Connection and Symbol Validation
     # Get current price for execution
     tick = mt5.symbol_info_tick(symbol)
     if tick is None:
@@ -46,16 +50,17 @@ def run(config, execute: bool = False):
         logger.warning("⚠️ Signal rejected: Score %s suggests move exhaustion.", last_signal['confirm_score'])
         return
 
-    # 2. Market State Filter: Prevent trading in pure noise
+    # 2. Volatility Adaptation: Low Volatility (CHOPPY)
     if last_signal["market_state"] == "CHOPPY":
-        logger.warning("⚠️ Signal rejected: Market state is CHOPPY.")
-        return
+        if last_signal["quality"] != "ELITE" or last_signal["confirm_score"] < 80:
+            logger.warning("⚠️ Low Volatility rejection: Requires ELITE quality and Score > 80.")
+            return
         
-    # 3. Volatility Anchor: If VOLATILE, require Major Zone and Elite Score
+    # 3. Volatility Adaptation: High Volatility (VOLATILE)
     if last_signal["market_state"] == "VOLATILE":
         is_major = bool(last_signal.get("major_support", 0)) or bool(last_signal.get("major_resistance", 0))
-        if not is_major or last_signal["confirm_score"] < 85:
-            logger.warning("⚠️ Volatile signal rejected: Requires Major Zone and Score > 85.")
+        if not is_major or last_signal["confirm_score"] < 90:
+            logger.warning("⚠️ High Volatility rejection: Requires Major Zone and Score > 90.")
             return
 
     # 3. Spread Check: Symbol-specific spread protection

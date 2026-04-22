@@ -274,8 +274,14 @@ def build_confirmations(df: pd.DataFrame) -> pd.DataFrame:
     out["is_bullish"] = out["close"] > out["open"]
     out["is_bearish"] = out["close"] < out["open"]
     out["confirm_score"] = 0
-    out["confirmed_signal"] = "no_trade"
 
+    # Climax Detection: If candle range is 2x the average, it's likely exhaustion
+    out["is_climax"] = (out["high"] - out["low"]) > (out["avg_range_20"] * 2.0)
+
+    # Reverting Anti-Indecision to 30% for better entry participation
+    out["is_indecision"] = out["body"] < (out["high"] - out["low"]) * 0.3
+
+    out["confirmed_signal"] = "no_trade"
     buy_mask = (out["setup"] == "BUY_SETUP") & (out["near_support"] == 1)
     sell_mask = (out["setup"] == "SELL_SETUP") & (out["near_resistance"] == 1)
 
@@ -283,7 +289,13 @@ def build_confirmations(df: pd.DataFrame) -> pd.DataFrame:
         buy_mask &= out["h1_alignment"] == 1
         sell_mask &= out["h1_alignment"] == 1
 
-    out.loc[buy_mask & (out["lower_wick"] > out["body"]), "confirm_score"] += 25
+    # Only reward wicks if the body isn't anemic
+    out.loc[buy_mask & (out["lower_wick"] > out["body"]) & (~out["is_indecision"]), "confirm_score"] += 20
+    
+    # Softening penalties to prevent late entries / confirmation trap
+    out.loc[buy_mask & out["is_indecision"], "confirm_score"] -= 15
+    out.loc[buy_mask & out["is_climax"], "confirm_score"] -= 20
+    
     out.loc[buy_mask & out["is_bullish"], "confirm_score"] += 25
     if "trend" in out.columns:
         out.loc[buy_mask & (out["trend"] == "bullish"), "confirm_score"] += 20
@@ -302,7 +314,10 @@ def build_confirmations(df: pd.DataFrame) -> pd.DataFrame:
         "confirmed_signal",
     ] = "buy"
 
-    out.loc[sell_mask & (out["upper_wick"] > out["body"]), "confirm_score"] += 25
+    out.loc[sell_mask & (out["upper_wick"] > out["body"]) & (~out["is_indecision"]), "confirm_score"] += 20
+    out.loc[sell_mask & out["is_indecision"], "confirm_score"] -= 15
+    out.loc[sell_mask & out["is_climax"], "confirm_score"] -= 20
+    
     out.loc[sell_mask & out["is_bearish"], "confirm_score"] += 25
     if "trend" in out.columns:
         out.loc[sell_mask & (out["trend"] == "bearish"), "confirm_score"] += 20

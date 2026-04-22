@@ -11,34 +11,38 @@ def _build_trade(row, config, equity):
         return None
 
     # --- HARD TRUTH FILTERS ---
-    # 1. Elite Paradox: Reject scores indicating move exhaustion (> 100)
+    # 1. Elite Paradox: Reject exhaustion signals (> 100)
     if float(row.get("confirm_score", 0)) > 100:
         return None
 
-    # 2. Market State Filter: Reject CHOPPY noise.
-    if row.get("market_state") == "CHOPPY":
-        return None
+    # 2. Volatility Regime Adaptation
+    state = row.get("market_state", "UNKNOWN")
+    quality = row.get("quality", "UNKNOWN")
+    risk_adj = 1.0
 
-    # 3. High Conviction Filter: Strict H1 Timeframe Alignment
-    if int(row.get("h1_alignment", 0)) != 1:
-        return None
-
-    # 4. Volatile Sniper Filter: Strict conditions for high volatility
-    if row.get("market_state") == "VOLATILE":
-        # Only ELITE quality allowed in high volatility
-        if row.get("quality") != "ELITE":
+    if state == "CHOPPY":  # Low Volatility: skip low-quality, require ELITE
+        if quality != "ELITE":
             return None
-        # Must be at a MAJOR zone to provide a "Risk-Free" anchor from wicks
+        score_floor = 80
+    elif state == "VOLATILE":  # High Volatility: ELITE only, Major Zones, 0.5x risk
+        if quality != "ELITE":
+            return None
         if not (bool(row.get("major_support", 0)) or bool(row.get("major_resistance", 0))):
             return None
-    elif row.get("quality") not in ["ELITE", "HIGH"] or (row.get("quality") == "HIGH" and row.get("market_state") != "RANGING"):
-        return None # RANGING allows HIGH, others require ELITE
+        score_floor = 90
+        risk_adj = 0.5
+    else:  # Medium Volatility (RANGING, TRENDING)
+        if state == "RANGING":
+            if quality not in ["ELITE", "HIGH"]:
+                return None
+            score_floor = 65
+        else:  # Default Trending
+            if quality != "ELITE":
+                return None
+            score_floor = 80
 
-    # 5. Dynamic Conviction Floor: 65 Ranging, 75 Trending, 85 Volatile
-    state = row.get("market_state")
-    score_floor = 65 if state == "RANGING" else (85 if state == "VOLATILE" else 75)
-    
-    if float(row.get("confirm_score", 0)) < score_floor:
+    # 3. Timeframe & Conviction Filters
+    if int(row.get("h1_alignment", 0)) != 1 or float(row.get("confirm_score", 0)) < score_floor:
         return None
 
     signal = row["confirmed_signal"]
@@ -81,7 +85,8 @@ def _build_trade(row, config, equity):
         "risk_multiplier": float(row.get("risk_multiplier", 1.0) or 1.0),
         "risk_amount": equity
         * config.backtest.risk_per_trade
-        * float(row.get("risk_multiplier", 1.0) or 1.0),
+        * float(row.get("risk_multiplier", 1.0) or 1.0)
+        * risk_adj,
         "confirm_score": row.get("confirm_score", 0),
     }
 
@@ -94,13 +99,14 @@ def _resolve_trade(trade, candle):
     low = float(candle["low"])
     
     # 1. Update Break-Even status
-    # Move SL to entry if price hits 1.5R Risk/Reward. 
-    # Gold needs more room (1.5R) to avoid being wicked out at BE before the TP.
+    # HIGH volatility uses 1.2R for faster locking, MEDIUM/LOW uses 1.5R for breathing room.
     if not trade.get("is_be", False):
-        if trade["side"] == "buy" and high >= (trade["executed_entry"] + (trade["risk_distance"] * 1.5)):
+        be_threshold = 1.2 if trade.get("market_state") == "VOLATILE" else 1.5
+        
+        if trade["side"] == "buy" and high >= (trade["executed_entry"] + (trade["risk_distance"] * be_threshold)):
             trade["stop_loss"] = trade["executed_entry"]
             trade["is_be"] = True
-        elif trade["side"] == "sell" and low <= (trade["executed_entry"] - (trade["risk_distance"] * 1.5)):
+        elif trade["side"] == "sell" and low <= (trade["executed_entry"] - (trade["risk_distance"] * be_threshold)):
             trade["stop_loss"] = trade["executed_entry"]
             trade["is_be"] = True
 
@@ -183,6 +189,15 @@ def _build_summary(trades_df, config, ending_balance, max_drawdown_pct, skipped_
         else 0.0
     )
 
+    # Calculate Sample Duration for Trade Frequency
+    duration_days = 0
+    if not closed_trades.empty:
+        start_dt = pd.to_datetime(closed_trades["signal_time"]).min()
+        end_dt = pd.to_datetime(closed_trades["exit_time"]).max()
+        if pd.notna(start_dt) and pd.notna(end_dt):
+            duration_days = max(1, (end_dt - start_dt).days)
+    trades_per_day = round(len(closed_trades) / duration_days, 2) if duration_days > 0 else 0
+
     return pd.DataFrame(
         [
             {
@@ -199,6 +214,7 @@ def _build_summary(trades_df, config, ending_balance, max_drawdown_pct, skipped_
                 "profit_factor": profit_factor,
                 "max_drawdown_pct": round(max_drawdown_pct, 2),
                 "skipped_overlap_signals": skipped_overlap,
+                "trades_per_day": trades_per_day,
             }
         ]
     )
@@ -332,12 +348,39 @@ def run_backtest_frame(df, config, label="full_period"):
     return trades_df, summary
 
 
-def run(config):
-    df = pd.read_csv(config.paths.trade_setups, parse_dates=["time"], low_memory=False)
-    trades_df, summary = run_backtest_frame(df, config, label="full_period")
+def run(config, in_sample_end: str | None = None, oos_start: str | None = None):
+    # 1. Validate dates FIRST
+    oos_valid = False
+    if in_sample_end and oos_start:
+        is_dt, oos_dt = pd.to_datetime(in_sample_end), pd.to_datetime(oos_start)
+        if is_dt >= oos_dt:
+            logger.warning("⚠️ Invalid OOS dates: IS end must be before OOS start. Skipping OOS mode.")
+        else:
+            oos_valid = True
 
-    trades_df.to_csv(config.paths.backtest_trades, index=False)
-    summary.to_csv(config.paths.backtest_summary, index=False)
+    df = pd.read_csv(config.paths.trade_setups, parse_dates=["time"], low_memory=False)
+
+    # 2. Cleanup old split summaries
+    for split in ["in_sample_summary.csv", "out_of_sample_summary.csv"]:
+        p = config.paths.backtest_summary.parent / split
+        if p.exists(): p.unlink()
+
+    # 3. Prepare backtest tasks
+    tasks = [("full_period", df, config.paths.backtest_summary)]
+    if oos_valid:
+        logger.info("Executing Date-Based OOS Split: IS <= %s, OOS >= %s", in_sample_end, oos_start)
+        is_df, oos_df = df[df["time"] <= is_dt].copy(), df[df["time"] >= oos_dt].copy()
+        if not is_df.empty:
+            tasks.append(("in_sample", is_df, config.paths.backtest_summary.parent / "in_sample_summary.csv"))
+        if not oos_df.empty:
+            tasks.append(("out_of_sample", oos_df, config.paths.backtest_summary.parent / "out_of_sample_summary.csv"))
+
+    # 4. Execute backtests and save
+    for label, frame, out_path in tasks:
+        trades_df, summary = run_backtest_frame(frame, config, label=label)
+        summary.to_csv(out_path, index=False)
+        if label == "full_period":
+            trades_df.to_csv(config.paths.backtest_trades, index=False)
 
     logger.info("Backtest trades saved at %s", config.paths.backtest_trades)
     logger.info("Backtest summary saved at %s", config.paths.backtest_summary)

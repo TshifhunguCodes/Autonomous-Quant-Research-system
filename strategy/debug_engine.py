@@ -12,7 +12,7 @@ def _read_csv_if_exists(path, **kwargs):
     return pd.DataFrame()
 
 
-def _format_terminal_summary(stats, summary_row, top_session, top_setup, weak_setup):
+def _format_terminal_summary(stats, summary_rows: list[pd.Series], session_df, top_setup, weak_setup):
     lines = [
         "",
         "IMPORTANT SUMMARY",
@@ -22,24 +22,29 @@ def _format_terminal_summary(stats, summary_row, top_session, top_setup, weak_se
         f"Quality mix: ELITE={stats['elite_count']} HIGH={stats['high_count']} MEDIUM={stats['medium_count']}",
     ]
 
-    if summary_row is not None:
+    for summary_row in summary_rows:
+        label = summary_row.get('label', 'UNKNOWN').replace('_', ' ').upper()
+        lines.append(f"\n--- {label} ---")
         lines.extend(
             [
                 f"Wins / Losses: {int(summary_row['wins'])} / {int(summary_row['losses'])}",
-                f"Win rate: {summary_row['win_rate_pct']}%",
+                f"Standard Win rate: {summary_row['win_rate_pct']}% (includes BE)",
+                f"True Win rate: {summary_row['true_win_rate_pct']}% (Accuracy)",
                 f"Net PnL: {summary_row['net_pnl']}",
                 f"Profit factor: {summary_row['profit_factor']}",
                 f"Max drawdown: {summary_row['max_drawdown_pct']}%",
+                f"Frequency: {summary_row.get('trades_per_day', 0)} trades/day",
             ]
         )
 
     lines.append("")
     lines.append("ANALYSIS")
 
-    if top_session is not None:
-        lines.append(
-            f"Best session: {top_session['session']} | trades={int(top_session['closed_trades'])} | net_pnl={top_session['net_pnl']} | win_rate={top_session['win_rate_pct']}%"
-        )
+    if session_df is not None and not session_df.empty:
+        for _, sess in session_df.iterrows():
+            lines.append(
+                f"Session: {sess['session']:<12} | trades={int(sess['closed_trades']):<4} | net_pnl={sess['net_pnl']:<10} | win_rate={sess['win_rate_pct']}%"
+            )
 
     if top_setup is not None:
         lines.append(
@@ -84,23 +89,15 @@ def run(config, print_terminal: bool = False):
         stats["medium_count"],
     )
 
-    summary_row = None
-    if config.paths.backtest_summary.exists():
-        summary = pd.read_csv(config.paths.backtest_summary)
-        if not summary.empty:
-            row = summary.iloc[0]
-            summary_row = row
-            logger.info(
-                "Backtest summary | ending_balance=%s closed_trades=%s win_rate_pct=%s max_drawdown_pct=%s profit_factor=%s",
-                row.get("ending_balance"),
-                row.get("closed_trades"),
-                row.get("win_rate_pct"),
-                row.get("max_drawdown_pct"),
-                row.get("profit_factor"),
-            )
+    summary_rows = []
+    for fname in ["backtest_summary.csv", "in_sample_summary.csv", "out_of_sample_summary.csv"]:
+        path = config.paths.backtest_summary.parent / fname
+        if path.exists():
+            summary = pd.read_csv(path)
+            if not summary.empty:
+                summary_rows.append(summary.iloc[0])
 
     session_df = _read_csv_if_exists(config.paths.session_performance)
-    top_session = session_df.iloc[0] if not session_df.empty else None
 
     setup_df = _read_csv_if_exists(config.paths.best_setup_types)
     top_setup = setup_df.iloc[0] if not setup_df.empty else None
@@ -110,8 +107,8 @@ def run(config, print_terminal: bool = False):
         print(
             _format_terminal_summary(
                 stats=stats,
-                summary_row=summary_row,
-                top_session=top_session,
+                summary_rows=summary_rows,
+                session_df=session_df,
                 top_setup=top_setup,
                 weak_setup=weak_setup,
             )

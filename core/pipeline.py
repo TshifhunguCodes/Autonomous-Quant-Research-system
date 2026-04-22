@@ -74,6 +74,8 @@ def run_backtest(
     reuse_artifacts: bool = False,
     rolling_window_days: int = 7,
     rolling_step_days: int = 7,
+    in_sample_end: str | None = None,
+    oos_start: str | None = None,
 ):
     logger.info("Starting backtest mode")
 
@@ -82,7 +84,7 @@ def run_backtest(
     else:
         logger.info("Reusing existing research artifacts")
 
-    backtesting_run(config)
+    backtesting_run(config, in_sample_end=in_sample_end, oos_start=oos_start)
     reporting_run(
         config,
         rolling_window_days=rolling_window_days,
@@ -117,19 +119,21 @@ def run_summary(
     reuse_artifacts: bool = False,
     rolling_window_days: int = 7,
     rolling_step_days: int = 7,
+    in_sample_end: str | None = None,
+    oos_start: str | None = None,
 ):
     logger.info("Starting summary mode")
 
     if refresh_data or not reuse_artifacts or not _research_artifacts_available(config):
         run_research(config, refresh_data=refresh_data)
-        backtesting_run(config)
+        backtesting_run(config, in_sample_end=in_sample_end, oos_start=oos_start)
         reporting_run(
             config,
             rolling_window_days=rolling_window_days,
             rolling_step_days=rolling_step_days,
         )
     elif not _backtest_reports_available(config):
-        backtesting_run(config)
+        backtesting_run(config, in_sample_end=in_sample_end, oos_start=oos_start)
         reporting_run(
             config,
             rolling_window_days=rolling_window_days,

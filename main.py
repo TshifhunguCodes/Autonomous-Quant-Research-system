@@ -88,6 +88,16 @@ def parse_args():
         default=42,
         help="Random seed for reproducible stress-test slice selection.",
     )
+    parser.add_argument(
+        "--in-sample-end",
+        default=None,
+        help="End date for in-sample testing (YYYY-MM-DD).",
+    )
+    parser.add_argument(
+        "--oos-start",
+        default=None,
+        help="Start date for out-of-sample testing (YYYY-MM-DD).",
+    )
     return parser.parse_args()
 
 
@@ -114,6 +124,8 @@ def main():
             reuse_artifacts=args.reuse_artifacts,
             rolling_window_days=args.rolling_window_days,
             rolling_step_days=args.rolling_step_days,
+            in_sample_end=args.in_sample_end,
+            oos_start=args.oos_start,
         )
         return
 
@@ -124,6 +136,8 @@ def main():
             reuse_artifacts=args.reuse_artifacts,
             rolling_window_days=args.rolling_window_days,
             rolling_step_days=args.rolling_step_days,
+            in_sample_end=args.in_sample_end,
+            oos_start=args.oos_start,
         )
         return
 
