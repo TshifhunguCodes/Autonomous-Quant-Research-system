@@ -1,0 +1,51 @@
+{
+  "market": {
+    "symbol": "XAUUSD",
+    "point_size": 0.01,
+    "m5_bars": 5000,
+    "h1_bars": 2000,
+    "history_years": 2.0
+  },
+  "zones": {
+    "near_threshold": 3.0,
+    "major_threshold": 5.0
+  },
+  "risk": {
+    "rr_ratio": 2.0,
+    "base_stop_buffer": 3.5
+  },
+  "regime": {
+    "aligned_range_risk_multiplier": 1.0,
+    "aligned_trend_risk_multiplier": 0.9,
+    "neutral_risk_multiplier": 0.75,
+    "trend_mismatch_risk_multiplier": 0.55,
+    "volatile_risk_multiplier": 0.6,
+    "choppy_risk_multiplier": 0.25,
+    "medium_quality_risk_multiplier": 0.85,
+    "high_quality_risk_multiplier": 1.0,
+    "elite_quality_risk_multiplier": 1.0,
+    "block_choppy_non_elite": true,
+    "block_volatile_medium": true
+  },
+  "backtest": {
+    "starting_balance": 10000.0,
+    "risk_per_trade": 0.01,
+    "slippage_points": 5.0,
+    "commission_per_trade": 2.5,
+    "allow_overlapping_positions": false
+  },
+  "live": {
+    "enabled": false,
+    "lot": 0.01,
+    "min_confirm_score": 60,
+    "approved_qualities": ["ELITE", "HIGH"],
+    "allow_duplicate_candle": false,
+    "require_h1_alignment": true,
+    "disallowed_market_states": ["CHOPPY"],
+    "max_signal_age_minutes": 20,
+    "max_spread_points": 25.0
+  },
+  "logging": {
+    "level": "INFO"
+  }
+}

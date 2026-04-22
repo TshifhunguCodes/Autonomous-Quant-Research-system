@@ -1,19 +1,13 @@
 import pandas as pd
 
-def run():
-    df = pd.read_csv("data/features/xauusd_m5_features.csv")
+from core.logging_utils import get_logger
+from strategy.pipeline_transforms import build_structure
 
-    df["prev_high"] = df["high"].shift(1)
-    df["prev_low"] = df["low"].shift(1)
 
-    df["bos_up"] = (df["high"] > df["prev_high"]).astype(int)
-    df["bos_down"] = (df["low"] < df["prev_low"]).astype(int)
+logger = get_logger(__name__)
 
-    df["trend"] = "neutral"
 
-    df.loc[df["bos_up"] == 1, "trend"] = "bullish"
-    df.loc[df["bos_down"] == 1, "trend"] = "bearish"
-
-    df.to_csv("data/features/structure.csv", index=False)
-
-    print("Structure Agent Complete")
+def run(config):
+    df = pd.read_csv(config.paths.m5_features, parse_dates=["time"])
+    build_structure(df).to_csv(config.paths.structure, index=False)
+    logger.info("Structure stage saved at %s", config.paths.structure)

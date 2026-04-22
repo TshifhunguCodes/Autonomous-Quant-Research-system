@@ -28,14 +28,21 @@ quant_system/
 |   |-- signal_agent.py
 |   |-- risk_engine.py
 |   |-- setup_engine.py
+|   |-- backtesting.py   
+|   |-- entry_agent.py
+|   |-- confirmation_agent.py
+| 
 |
 |
 |
 |
 |
-|
-|
-|
-|
-|
+TO VIEW SUMMARY, BACKTESTING, LIVE MODE 
+1.  python main.py --mode backtest
+2.  python main.py --mode summary
+3.  python main.py --live mode  
+4.  make mode separate which fatser safer
+    python main. py --mode live --loop
+5   python main.py --mode research
+6.  python main.py --mode summary --reuse-artifacts
 |
