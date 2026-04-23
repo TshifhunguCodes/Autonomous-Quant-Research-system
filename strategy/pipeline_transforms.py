@@ -11,6 +11,18 @@ def build_m5_features(df_m5: pd.DataFrame) -> pd.DataFrame:
     df["momentum"] = df["close"].diff()
     df["vol_avg"] = df["tick_volume"].rolling(20).mean()
     df["volume_spike"] = df["tick_volume"] > df["vol_avg"]
+    
+    # Calculate ATR
+    df["prev_close"] = df["close"].shift(1)
+    df["tr"] = np.maximum(
+        df["high"] - df["low"],
+        np.maximum(
+            (df["high"] - df["prev_close"]).abs(),
+            (df["low"] - df["prev_close"]).abs()
+        )
+    )
+    df["atr"] = df["tr"].rolling(14).mean()
+    
     return df
 
 
@@ -395,6 +407,33 @@ def build_trade_setups(df: pd.DataFrame, config) -> pd.DataFrame:
     out.loc[
         volatile_medium_block, "risk_dampening_reason"
     ] = "blocked_volatile_medium"
+
+    # Session-aware filter
+    if hasattr(config, 'session_filters') and config.session_filters.disable_late_session:
+        late_session_mask = (out["hour"] >= config.session_filters.late_session_start_hour) & out["trade_allowed"]
+        out.loc[late_session_mask, "trade_allowed"] = False
+        out.loc[late_session_mask, "risk_dampening_reason"] = "late_session_disabled"
+
+    # Disabled sessions filter
+    def get_session(hour):
+        if 0 <= hour < 8:
+            return 'Asian'
+        elif 8 <= hour < 16:
+            return 'European'
+        else:
+            return 'US'
+
+    out['session'] = out['hour'].apply(get_session)
+    if hasattr(config, 'session_filters') and config.session_filters.disabled_sessions:
+        session_mask = out['session'].isin(config.session_filters.disabled_sessions) & out["trade_allowed"]
+        out.loc[session_mask, "trade_allowed"] = False
+        out.loc[session_mask, "risk_dampening_reason"] = "disabled_session"
+
+    # Disabled market states filter
+    if hasattr(config, 'session_filters') and config.session_filters.disabled_market_states:
+        state_mask = out['market_state'].isin(config.session_filters.disabled_market_states) & out["trade_allowed"]
+        out.loc[state_mask, "trade_allowed"] = False
+        out.loc[state_mask, "risk_dampening_reason"] = "disabled_market_state"
 
     buy_mask = (out["confirmed_signal"] == "buy") & out["trade_allowed"]
     sell_mask = (out["confirmed_signal"] == "sell") & out["trade_allowed"]

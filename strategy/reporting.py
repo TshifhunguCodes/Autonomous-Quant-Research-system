@@ -350,6 +350,52 @@ def _summarize_best_setup_types(trades_df):
     ).reset_index(drop=True)
 
 
+def _summarize_system_regime_performance(trades_df):
+    """Computes granular performance metrics for A vs B systems across regimes."""
+    if trades_df.empty:
+        return pd.DataFrame()
+
+    closed = trades_df[trades_df["result"].isin(["WIN", "LOSS", "BE"])].copy()
+    if closed.empty:
+        return pd.DataFrame()
+ 
+    results = []
+    # Group by System and various Regimes
+    regime_cols = ["session", "market_state", "market_regime"]
+    
+    for system in closed["system"].unique():
+        sys_df = closed[closed["system"] == system]
+        
+        for col in regime_cols:
+            for val, group in sys_df.groupby(col):
+                wins = int((group["result"] == "WIN").sum())
+                losses = int((group["result"] == "LOSS").sum())
+                net_pnl = float(group["pnl"].sum())
+                gp = float(group.loc[group["pnl"] > 0, "pnl"].sum())
+                gl = abs(float(group.loc[group["pnl"] < 0, "pnl"].sum()))
+                
+                # Sub-Equity Curve for Drawdown calculation
+                curve = group.sort_values("exit_time")["pnl"].cumsum()
+                max_dd = 0
+                if not curve.empty:
+                    peak = curve.cummax()
+                    dd = peak - curve
+                    max_dd = dd.max()
+
+                results.append({
+                    "system": system,
+                    "regime_type": col,
+                    "regime_value": val,
+                    "trades": len(group),
+                    "win_rate": round((wins / (wins + losses)) * 100, 2) if (wins + losses) > 0 else 0,
+                    "profit_factor": round(gp / gl, 2) if gl > 0 else (round(gp, 2) if gp > 0 else 1.0),
+                    "net_pnl": round(net_pnl, 2),
+                    "max_dd_points": round(max_dd, 2)
+                })
+                
+    return pd.DataFrame(results).sort_values(["system", "regime_type", "net_pnl"], ascending=[True, True, False])
+
+
 def run(config, rolling_window_days=7, rolling_step_days=7):
     df = pd.read_csv(config.paths.trade_setups, parse_dates=["time"], low_memory=False)
     windows = _build_rolling_windows(
@@ -358,45 +404,57 @@ def run(config, rolling_window_days=7, rolling_step_days=7):
         step_days=rolling_step_days,
     )
 
-    rolling_rows = []
-    for start, end, window_df in windows:
-        _, summary = run_backtest_frame(
-            window_df,
-            config,
-            label=f"{start.date()}_{(end - pd.Timedelta(minutes=1)).date()}",
-        )
-        row = summary.iloc[0].to_dict()
-        row["window_start"] = start
-        row["window_end"] = end
-        row["rows"] = len(window_df)
-        row["confirmed_signals"] = int(window_df["confirmed_signal"].isin(["buy", "sell"]).sum())
-        rolling_rows.append(row)
+    stability_stats = []
+    for system_label in ["ALPHA", "FLOW", "COMBINED"]:
+        rolling_rows = []
+        for start, end, window_df in windows:
+            _, summary = run_backtest_frame(
+                window_df,
+                config,
+                label=f"{system_label}_{start.date()}",
+                mode=system_label
+            )
+            row = summary.iloc[0].to_dict()
+            row["window_start"] = start
+            row["window_end"] = end
+            rolling_rows.append(row)
 
-    rolling_df = pd.DataFrame(rolling_rows)
-    if not rolling_df.empty:
-        rolling_df = rolling_df[
-            [
-                "label",
-                "window_start",
-                "window_end",
-                "rows",
-                "confirmed_signals",
-                "starting_balance",
-                "ending_balance",
-                "net_pnl",
-                "closed_trades",
-                "wins",
-                "losses",
-                "open_trades",
-                "win_rate_pct",
-                "profit_factor",
-                "max_drawdown_pct",
-                "skipped_overlap_signals",
-            ]
-        ]
-    rolling_df.to_csv(config.paths.rolling_backtest_summary, index=False)
+        rolling_df = pd.DataFrame(rolling_rows)
+        out_name = f"rolling_{system_label.lower()}_summary.csv"
+        rolling_df.to_csv(config.paths.backtest_dir / out_name, index=False)
+
+        # Calculate Stability Metrics
+        if not rolling_df.empty and len(rolling_df) > 1:
+            wr_std = rolling_df["true_win_rate_pct"].std()
+            pf_mean = rolling_df["profit_factor"].mean()
+            pf_std = rolling_df["profit_factor"].std()
+            dd_mean = rolling_df["max_drawdown_pct"].mean()
+            dd_std = rolling_df["max_drawdown_pct"].std()
+            
+            stability_stats.append({
+                "System": system_label,
+                "WR_StdDev": round(wr_std, 2),
+                "PF_Stability": round(1 - (pf_std / pf_mean), 2) if pf_mean > 0 else 0,
+                "DD_Consistency": round(1 - (dd_std / dd_mean), 2) if dd_mean > 0 else 0,
+                "Avg_Net_PnL": round(rolling_df["net_pnl"].mean(), 2)
+            })
+
+    if stability_stats:
+        stability_df = pd.DataFrame(stability_stats)
+        stability_path = config.paths.backtest_dir / "consolidated_stability_report.csv"
+        stability_df.to_csv(stability_path, index=False)
+        
+        print("\n" + "="*95)
+        print(f"{'CONSOLIDATED STABILITY REPORT (ROLLING WINDOWS)':^95}")
+        print("="*95)
+        print(stability_df.to_string(index=False))
+        print("="*95)
 
     full_trades = pd.read_csv(config.paths.backtest_trades, parse_dates=["signal_time", "exit_time"])
+    
+    regime_perf = _summarize_system_regime_performance(full_trades)
+    regime_perf.to_csv(config.paths.backtest_dir / "system_regime_performance.csv", index=False)
+
     monthly_df = _summarize_monthly(full_trades)
     monthly_df.to_csv(config.paths.monthly_performance, index=False)
     equity_curve_df = _build_equity_curve(full_trades, config.backtest.starting_balance)

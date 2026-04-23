@@ -45,7 +45,17 @@
     "max_signal_age_minutes": 20,
     "max_spread_points": 25.0
   },
-  "logging": {
-    "level": "INFO"
+  "session_filters": {
+    "disable_late_session": false,
+    "late_session_start_hour": 20,
+    "disabled_sessions": ["US"],
+    "disabled_market_states": []
+  },
+  "risk": {
+    "rr_ratio": 2.0,
+    "base_stop_buffer": 3.5,
+    "use_atr_sizing": true,
+    "atr_period": 14,
+    "atr_risk_per_unit": 0.01
   }
 }

@@ -6,31 +6,79 @@ from core.logging_utils import get_logger
 logger = get_logger(__name__)
 
 
+def _get_session_label(hour):
+    """Classifies hour into market sessions for metadata tracking."""
+    if 0 <= hour < 7: return "ASIA"
+    if 7 <= hour < 13: return "LONDON"
+    if 13 <= hour < 18: return "NEW_YORK"
+    return "LATE_SESSION"
+
+
+def _build_alpha_trade(row, config, equity):
+    """System A: STRICT ALPHA logic"""
+    hour = pd.to_datetime(row["time"]).hour
+    quality = row.get("quality", "UNKNOWN")
+    state = row.get("market_state", "UNKNOWN")
+    score = float(row.get("confirm_score", 0))
+    
+    # Filter 1: Elite Only + London/Asia Session Focus
+    if quality != "ELITE" or hour not in config.regime.alpha_session_hours:
+        return None
+        
+    # Filter 2: Regime-based Conviction (Stability Enhancement)
+    # Trends often have deep pullbacks; Alpha requires higher conviction in trending states
+    if state == "TRENDING" and score < 85:
+        return None
+
+    if state in ["CHOPPY", "VOLATILE"]:
+        return None
+        
+    trade = _build_trade_base(row, config, equity, risk_adj=1.0, is_exploratory=False)
+    if trade:
+        trade["system"] = "ALPHA"
+        trade["data_type"] = "EXECUTION_RESULT"
+    return trade
+
+def _build_flow_trade(row, config, equity):
+    """System B: ADAPTIVE FLOW logic - Exploratory Data Engine Only"""
+    # Risk scaling: base lot × flow risk multiplier × 0.5 dampener
+    risk_adj = config.regime.flow_risk_multiplier * 0.5
+
+    # Broader quality acceptance, reduced risk
+    trade = _build_trade_base(row, config, equity, risk_adj=risk_adj, is_exploratory=True)
+    if trade:
+        trade["system"] = "FLOW_EXPLORATORY"
+        trade["data_type"] = "EXPLORATORY_DATA"
+    return trade
+
 def _build_trade(row, config, equity):
+    """Legacy compatibility wrapper for external modules like replay_engine."""
+    # Priority routing: System A (Alpha) first, then System B (Flow)
+    alpha_candidate = _build_alpha_trade(row, config, equity)
+    if alpha_candidate:
+        return alpha_candidate
+    return _build_flow_trade(row, config, equity)
+
+def _build_trade_base(row, config, equity, risk_adj=1.0, is_exploratory=False):
+    """Common trade construction logic with adaptive filters"""
     if not bool(row.get("trade_allowed", True)):
         return None
 
-    # --- HARD TRUTH FILTERS ---
-    # 1. Elite Paradox: Reject exhaustion signals (> 100)
-    if float(row.get("confirm_score", 0)) > 100:
-        return None
-
-    # 2. Volatility Regime Adaptation
+    hour = pd.to_datetime(row["time"]).hour
     state = row.get("market_state", "UNKNOWN")
     quality = row.get("quality", "UNKNOWN")
-    risk_adj = 1.0
+
+    if float(row.get("confirm_score", 0)) > 100: return None
 
     if state == "CHOPPY":  # Low Volatility: skip low-quality, require ELITE
-        if quality != "ELITE":
+        if not is_exploratory and quality != "ELITE":
             return None
         score_floor = 80
     elif state == "VOLATILE":  # High Volatility: ELITE only, Major Zones, 0.5x risk
-        if quality != "ELITE":
-            return None
-        if not (bool(row.get("major_support", 0)) or bool(row.get("major_resistance", 0))):
+        if not is_exploratory and (quality != "ELITE" or not (bool(row.get("major_support", 0)) or bool(row.get("major_resistance", 0)))):
             return None
         score_floor = 90
-        risk_adj = 0.5
+        risk_adj *= 0.5
     else:  # Medium Volatility (RANGING, TRENDING)
         if state == "RANGING":
             if quality not in ["ELITE", "HIGH"]:
@@ -41,7 +89,29 @@ def _build_trade(row, config, equity):
                 return None
             score_floor = 80
 
-    # 3. Timeframe & Conviction Filters
+    # 3. Session-Aware Adaptive Restrictions (Bypass for Exploratory System B)
+    if not is_exploratory and config.regime.adaptive_ny_guard:
+        is_new_york = 13 <= hour <= 20
+        is_late_session = hour > 20 or hour < 2
+
+        if is_new_york:
+            score_floor += 10 
+            if state in ["VOLATILE", "TRENDING"] and quality != "ELITE":
+                return None
+        elif is_late_session:
+            if quality != "ELITE" or float(row.get("confirm_score", 0)) < 90:
+                return None
+
+    # 4. Setup-Level Weighting & Priority
+    setup_key = f"{row.get('setup')}_{quality}_{state}"
+    priority_mult = config.regime.setup_weights.get(setup_key, 1.0)
+    
+    if priority_mult == 0.0:
+        return None
+    
+    risk_adj *= priority_mult
+
+    # 5. Timeframe & Conviction Filters
     if int(row.get("h1_alignment", 0)) != 1 or float(row.get("confirm_score", 0)) < score_floor:
         return None
 
@@ -66,6 +136,12 @@ def _build_trade(row, config, equity):
     if risk_distance <= 0 or reward_distance <= 0:
         return None
 
+    if hasattr(config.risk, 'use_atr_sizing') and config.risk.use_atr_sizing:
+        atr_value = float(row.get("atr", 1.0))
+        risk_amount = equity * config.risk.atr_risk_per_unit * atr_value * float(row.get("risk_multiplier", 1.0) or 1.0) * risk_adj
+    else:
+        risk_amount = equity * config.backtest.risk_per_trade * float(row.get("risk_multiplier", 1.0) or 1.0) * risk_adj
+
     return {
         "signal_time": row["time"],
         "side": signal,
@@ -74,6 +150,7 @@ def _build_trade(row, config, equity):
         "quality": row.get("quality", "UNKNOWN"),
         "market_state": row.get("market_state", "UNKNOWN"),
         "market_regime": row.get("market_regime", "UNKNOWN"),
+        "session": _get_session_label(hour),
         "h1_bias": row.get("h1_bias", "UNKNOWN"),
         "h1_alignment": row.get("h1_alignment", 0),
         "entry_price": entry_price,
@@ -83,10 +160,7 @@ def _build_trade(row, config, equity):
         "risk_distance": risk_distance,
         "reward_distance": reward_distance,
         "risk_multiplier": float(row.get("risk_multiplier", 1.0) or 1.0),
-        "risk_amount": equity
-        * config.backtest.risk_per_trade
-        * float(row.get("risk_multiplier", 1.0) or 1.0)
-        * risk_adj,
+        "risk_amount": risk_amount,
         "confirm_score": row.get("confirm_score", 0),
     }
 
@@ -220,7 +294,23 @@ def _build_summary(trades_df, config, ending_balance, max_drawdown_pct, skipped_
     )
 
 
-def run_backtest_frame(df, config, label="full_period"):
+def _calculate_performance_score(history):
+    """Calculates a selection score based on recent trade history."""
+    if not history:
+        return 1.0  # Neutral starting point
+    
+    wins = sum(1 for t in history if t['result'] == 'WIN')
+    pfs = [t['pnl'] for t in history]
+    gross_profit = sum(p for p in pfs if p > 0)
+    gross_loss = abs(sum(p for p in pfs if p < 0))
+    
+    win_rate = wins / len(history)
+    pf = (gross_profit / gross_loss) if gross_loss > 0 else (2.0 if gross_profit > 0 else 1.0)
+    
+    # Score = WinRate + normalized Profit Factor
+    return win_rate + (min(pf, 3.0) / 3.0)
+
+def run_backtest_frame(df, config, label="full_period", mode="COMBINED"):
     df = df.sort_values("time").reset_index(drop=True)
 
     equity = config.backtest.starting_balance
@@ -231,6 +321,8 @@ def run_backtest_frame(df, config, label="full_period"):
     skipped_overlap = 0
     reentry_candidates = [] 
     signal_entry_counts = {} # signal_time -> count
+    alpha_history = []
+    flow_history = []
 
     for _, row in df.iterrows():
         current_time = row["time"]
@@ -265,6 +357,12 @@ def run_backtest_frame(df, config, label="full_period"):
                 # Only allow re-entry if the market isn't CHOPPY
                 if was_be_stop and row["market_state"] != "CHOPPY":
                     reentry_candidates.append(active_trade)
+
+                # Track history for dynamic priority
+                if active_trade.get("system") == "ALPHA":
+                    alpha_history = (alpha_history + [{"result": outcome, "pnl": pnl}])[-config.regime.priority_lookback:]
+                elif active_trade.get("system") == "FLOW":
+                    flow_history = (flow_history + [{"result": outcome, "pnl": pnl}])[-config.regime.priority_lookback:]
 
                 trade_records.append(
                     {
@@ -317,11 +415,23 @@ def run_backtest_frame(df, config, label="full_period"):
         if row["confirmed_signal"] not in {"buy", "sell"}:
             continue
         signal_entry_counts[row["time"]] = 1
+        
+        # Dual-System Decision Engine
+        alpha_candidate = _build_alpha_trade(row, config, equity)
+        flow_candidate = _build_flow_trade(row, config, equity)
+        
+        candidate_trade = None
+        if mode == "ALPHA":
+            candidate_trade = alpha_candidate
+        elif mode == "FLOW":
+            candidate_trade = flow_candidate
+        else: # COMBINED: Alpha takes priority, Flow is exploratory secondary
+            candidate_trade = alpha_candidate if alpha_candidate else flow_candidate
 
-        candidate_trade = _build_trade(row, config, equity)
         if candidate_trade is None:
             continue
 
+        candidate_trade["system_mode"] = mode
         active_trades.append(candidate_trade)
 
     for active_trade in active_trades:
@@ -352,35 +462,70 @@ def run(config, in_sample_end: str | None = None, oos_start: str | None = None):
     # 1. Validate dates FIRST
     oos_valid = False
     if in_sample_end and oos_start:
-        is_dt, oos_dt = pd.to_datetime(in_sample_end), pd.to_datetime(oos_start)
-        if is_dt >= oos_dt:
-            logger.warning("⚠️ Invalid OOS dates: IS end must be before OOS start. Skipping OOS mode.")
-        else:
-            oos_valid = True
+        try:
+            is_dt, oos_dt = pd.to_datetime(in_sample_end), pd.to_datetime(oos_start)
+            if is_dt >= oos_dt:
+                logger.warning("⚠️ Invalid OOS dates: IS end must be before OOS start. Skipping OOS mode.")
+            else:
+                oos_valid = True
+        except (ValueError, TypeError):
+            logger.error("❌ Date Parse Error: Could not parse in_sample_end='%s' or oos_start='%s'. "
+                         "Please use YYYY-MM-DD format.", in_sample_end, oos_start)
 
     df = pd.read_csv(config.paths.trade_setups, parse_dates=["time"], low_memory=False)
 
-    # 2. Cleanup old split summaries
-    for split in ["in_sample_summary.csv", "out_of_sample_summary.csv"]:
-        p = config.paths.backtest_summary.parent / split
-        if p.exists(): p.unlink()
+    # 3. Prepare Multi-System Tasks
+    system_modes = [
+        ("ALPHA", config.paths.backtest_alpha_trades, config.paths.backtest_alpha_summary),
+        ("FLOW", config.paths.backtest_flow_trades, config.paths.backtest_flow_summary),
+        ("COMBINED", config.paths.backtest_trades, config.paths.backtest_summary)
+    ]
+    
+    results = {}
 
-    # 3. Prepare backtest tasks
-    tasks = [("full_period", df, config.paths.backtest_summary)]
+    # 4. Execute backtests per system
+    for mode, t_path, s_path in system_modes:
+        trades_df, summary = run_backtest_frame(df, config, label=mode, mode=mode)
+        trades_df.to_csv(t_path, index=False)
+        summary.to_csv(s_path, index=False)
+        results[mode] = {"summary": summary, "trades": trades_df}
+
+    # Final comparison summary
+    final_comparison = pd.concat([r["summary"] for r in results.values()])
+    comparison_path = config.paths.backtest_summary.parent / "system_comparison.csv"
+    final_comparison.to_csv(comparison_path, index=False)
+
+    # --- CONSOLE SUMMARY DISPLAY ---
+    print("\n" + "="*95)
+    print(f"{'DUAL-SYSTEM PERFORMANCE COMPARISON':^95}")
+    print("="*95)
+    display_cols = ["label", "net_pnl", "win_rate_pct", "true_win_rate_pct", "profit_factor", "max_drawdown_pct", "closed_trades"]
+    print(final_comparison[display_cols].to_string(index=False))
+
     if oos_valid:
-        logger.info("Executing Date-Based OOS Split: IS <= %s, OOS >= %s", in_sample_end, oos_start)
-        is_df, oos_df = df[df["time"] <= is_dt].copy(), df[df["time"] >= oos_dt].copy()
-        if not is_df.empty:
-            tasks.append(("in_sample", is_df, config.paths.backtest_summary.parent / "in_sample_summary.csv"))
-        if not oos_df.empty:
-            tasks.append(("out_of_sample", oos_df, config.paths.backtest_summary.parent / "out_of_sample_summary.csv"))
+        print("\n" + "-"*95)
+        print(f"{'OVERFITTING VALIDATION: IN-SAMPLE VS OUT-OF-SAMPLE (COMBINED)':^95}")
+        print("-"*95)
+        
+        _, is_sum = run_backtest_frame(df[df["time"] <= is_dt], config, label="IN_SAMPLE", mode="COMBINED")
+        _, oos_sum = run_backtest_frame(df[df["time"] >= oos_dt], config, label="OUT_OF_SAMPLE", mode="COMBINED")
+        
+        is_oos_comp = pd.concat([is_sum, oos_sum])
+        print(is_oos_comp[display_cols].to_string(index=False))
+        
+        # Stability Check: Calculate degradation
+        is_wr = is_sum["true_win_rate_pct"].iloc[0]
+        oos_wr = oos_sum["true_win_rate_pct"].iloc[0]
+        wr_degradation = ((is_wr - oos_wr) / is_wr) * 100 if is_wr > 0 else 0
+        
+        print(f"\nStability Check: Win Rate Degradation (IS -> OOS): {wr_degradation:.2f}%")
+        if wr_degradation > 20:
+            print("🚨 WARNING: High degradation detected. Strategy may be overfitted.")
+        else:
+            print("✅ PASS: Strategy shows stable OOS performance.")
 
-    # 4. Execute backtests and save
-    for label, frame, out_path in tasks:
-        trades_df, summary = run_backtest_frame(frame, config, label=label)
-        summary.to_csv(out_path, index=False)
-        if label == "full_period":
-            trades_df.to_csv(config.paths.backtest_trades, index=False)
+        is_sum.to_csv(config.paths.backtest_summary.parent / "in_sample_summary.csv", index=False)
+        oos_sum.to_csv(config.paths.backtest_summary.parent / "out_of_sample_summary.csv", index=False)
 
-    logger.info("Backtest trades saved at %s", config.paths.backtest_trades)
-    logger.info("Backtest summary saved at %s", config.paths.backtest_summary)
+    print("="*95 + "\n")
+    logger.info("Dual-system backtest complete.")

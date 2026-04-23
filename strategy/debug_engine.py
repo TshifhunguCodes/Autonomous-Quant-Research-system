@@ -103,6 +103,15 @@ def run(config, print_terminal: bool = False):
     top_setup = setup_df.iloc[0] if not setup_df.empty else None
     weak_setup = setup_df.sort_values("net_pnl").iloc[0] if not setup_df.empty else None
 
+    # Comparative System Report
+    regime_path = config.paths.backtest_dir / "system_regime_performance.csv"
+    if regime_path.exists():
+        regime_df = pd.read_csv(regime_path)
+        print("\n--- SYSTEM COMPARISON BY REGIME ---")
+        # Filter for top level view: System vs Session
+        session_view = regime_df[regime_df["regime_type"] == "session"].copy()
+        print(session_view[["system", "regime_value", "trades", "win_rate", "profit_factor", "net_pnl"]].to_string(index=False))
+
     if print_terminal:
         print(
             _format_terminal_summary(

@@ -14,6 +14,10 @@ class AppPaths:
     clean_dir: Path
     features_dir: Path
     backtest_dir: Path
+    backtest_alpha_trades: Path
+    backtest_alpha_summary: Path
+    backtest_flow_trades: Path
+    backtest_flow_summary: Path
     replay_dir: Path
     stress_dir: Path
     live_dir: Path
@@ -71,6 +75,10 @@ class AppPaths:
             clean_dir=clean_dir,
             features_dir=features_dir,
             backtest_dir=backtest_dir,
+            backtest_alpha_trades=backtest_dir / "alpha_trades.csv",
+            backtest_alpha_summary=backtest_dir / "alpha_summary.csv",
+            backtest_flow_trades=backtest_dir / "flow_trades.csv",
+            backtest_flow_summary=backtest_dir / "flow_summary.csv",
             replay_dir=replay_dir,
             stress_dir=stress_dir,
             live_dir=live_dir,
@@ -131,6 +139,9 @@ class ZoneConfig:
 class RiskConfig:
     rr_ratio: float = 2.0
     base_stop_buffer: float = 3.5
+    use_atr_sizing: bool = False
+    atr_period: int = 14
+    atr_risk_per_unit: float = 0.01
 
 
 @dataclass(frozen=True)
@@ -146,6 +157,19 @@ class RegimeConfig:
     elite_quality_risk_multiplier: float = 1.0
     block_choppy_non_elite: bool = True
     block_volatile_medium: bool = True
+    adaptive_ny_guard: bool = True
+    flow_risk_multiplier: float = 0.5  # System B risk dampening
+    alpha_session_hours: list[int] = field(default_factory=lambda: list(range(2, 16))) # System A hours
+    dynamic_priority: bool = True
+    priority_lookback: int = 15 # Number of recent trades to evaluate
+    setup_weights: dict[str, float] = field(
+        default_factory=lambda: {
+            "SELL_SETUP_ELITE_RANGING": 1.2,
+            "BUY_SETUP_ELITE_RANGING": 1.1,
+            "BUY_SETUP_ELITE_VOLATILE": 0.5,
+            "SELL_SETUP_MEDIUM_TRENDING": 0.0,
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -175,6 +199,14 @@ class LiveConfig:
 
 
 @dataclass(frozen=True)
+class SessionFiltersConfig:
+    disable_late_session: bool = False
+    late_session_start_hour: int = 20
+    disabled_sessions: list[str] = field(default_factory=lambda: [])
+    disabled_market_states: list[str] = field(default_factory=lambda: [])
+
+
+@dataclass(frozen=True)
 class LoggingConfig:
     level: str = "INFO"
 
@@ -188,6 +220,7 @@ class AppConfig:
     regime: RegimeConfig
     backtest: BacktestConfig
     live: LiveConfig
+    session_filters: SessionFiltersConfig
     logging: LoggingConfig
 
 
@@ -215,6 +248,7 @@ def load_config(config_path: str | None = None) -> AppConfig:
         regime=RegimeConfig(**_section(payload, "regime")),
         backtest=BacktestConfig(**_section(payload, "backtest")),
         live=LiveConfig(**_section(payload, "live")),
+        session_filters=SessionFiltersConfig(**_section(payload, "session_filters")),
         logging=LoggingConfig(**_section(payload, "logging")),
     )
 
