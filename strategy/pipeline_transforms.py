@@ -134,6 +134,11 @@ def build_market_state(df: pd.DataFrame) -> pd.DataFrame:
         out["candle_range"] > out["avg_range_20"] * 2,
         "market_state",
     ] = "VOLATILE"
+
+    # State sequence tracking for breakout identification
+    state_groups = (out["market_state"] != out["market_state"].shift(1)).cumsum()
+    out["state_count"] = out.groupby(state_groups).cumcount()
+    out["is_first_breakout"] = (out["market_state"].isin(["TRENDING", "VOLATILE"])) & (out["state_count"] == 0)
     return out
 
 

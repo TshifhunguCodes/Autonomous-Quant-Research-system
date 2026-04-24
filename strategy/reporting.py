@@ -396,7 +396,52 @@ def _summarize_system_regime_performance(trades_df):
     return pd.DataFrame(results).sort_values(["system", "regime_type", "net_pnl"], ascending=[True, True, False])
 
 
-def run(config, rolling_window_days=7, rolling_step_days=7):
+def _generate_ny_deep_dive(trades_df):
+    """Performs granular analysis of the New York session to identify micro-strategies."""
+    ny = trades_df[trades_df["session"] == "NEW_YORK"].copy()
+    closed_ny = ny[ny["result"].isin(["WIN", "LOSS", "BE"])].copy()
+    if closed_ny.empty:
+        return "No closed New York trades to analyze."
+
+    # Calculate Duration
+    closed_ny["duration_mins"] = (pd.to_datetime(closed_ny["exit_time"]) - pd.to_datetime(closed_ny["signal_time"])).dt.total_seconds() / 60
+    avg_dur = closed_ny["duration_mins"].mean()
+
+    # Helper for stats
+    def get_stats(df):
+        wins = (df["result"] == "WIN").sum()
+        losses = (df["result"] == "LOSS").sum()
+        total = wins + losses
+        wr = (wins / total * 100) if total > 0 else 0
+        return f"Trades: {len(df):<3} | WR: {wr:>5.1f}% | PnL: {df['pnl'].sum():>8.2f}"
+
+    closed_ny["hour"] = pd.to_datetime(closed_ny["signal_time"]).dt.hour
+    
+    lines = ["", "="*60, "NEW YORK SESSION DEEP DIVE", "="*60]
+    lines.append(f"Average Trade Duration: {avg_dur:.1f} minutes")
+    
+    lines.append("\n--- Performance by Hour (NY) ---")
+    for hr, group in closed_ny.groupby("hour"):
+        lines.append(f"Hour {hr:02}:00 | {get_stats(group)}")
+
+    lines.append("\n--- Performance by Setup (NY) ---")
+    for setup, group in closed_ny.groupby("setup"):
+        lines.append(f"Setup {setup:<10} | {get_stats(group)}")
+
+    lines.append("\n--- Performance by Volatility Regime (NY) ---")
+    for state, group in closed_ny.groupby("market_state"):
+        lines.append(f"Regime {state:<10} | {get_stats(group)}")
+
+    lines.append("\n--- First Breakout vs Later Entries (NY) ---")
+    for is_first, group in closed_ny.groupby("is_first_breakout"):
+        label = "First Breakout" if is_first else "Later Entry  "
+        lines.append(f"{label} | {get_stats(group)}")
+    
+    lines.append("="*60)
+    return "\n".join(lines)
+
+
+def run(config, rolling_window_days=30, rolling_step_days=7):
     df = pd.read_csv(config.paths.trade_setups, parse_dates=["time"], low_memory=False)
     windows = _build_rolling_windows(
         df,
@@ -454,6 +499,18 @@ def run(config, rolling_window_days=7, rolling_step_days=7):
     
     regime_perf = _summarize_system_regime_performance(full_trades)
     regime_perf.to_csv(config.paths.backtest_dir / "system_regime_performance.csv", index=False)
+
+    # Generate NY Before-vs-After Metrics for terminal display
+    ny_perf = regime_perf[regime_perf["regime_value"] == "NEW_YORK"].copy()
+    if not ny_perf.empty:
+        print("\n" + "-"*40)
+        print(" NEW YORK PERFORMANCE (AFTER SESSION REFACTOR) ")
+        print("-"*40)
+        print(ny_perf[["system", "trades", "win_rate", "profit_factor", "net_pnl"]].to_string(index=False))
+        print("-"*40)
+
+    ny_deep_dive = _generate_ny_deep_dive(full_trades)
+    print(ny_deep_dive)
 
     monthly_df = _summarize_monthly(full_trades)
     monthly_df.to_csv(config.paths.monthly_performance, index=False)

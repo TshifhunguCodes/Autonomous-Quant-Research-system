@@ -45,7 +45,7 @@ def parse_args():
     parser.add_argument(
         "--rolling-window-days",
         type=int,
-        default=7,
+        default=30,
         help="Window size in days for rolling backtest reports.",
     )
     parser.add_argument(

@@ -2,7 +2,7 @@
   "market": {
     "symbol": "XAUUSD",
     "point_size": 0.01,
-    "m5_bars": 5000,
+    "m5_bars": 100000,
     "h1_bars": 2000,
     "history_years": 2.0
   },

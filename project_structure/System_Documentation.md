@@ -2,10 +2,12 @@
 
 ## 0. Quick Start Checklist
 If you are a human operator or an AI assistant setting this up for the first time:
-1.  **Environment:** Ensure Python 3.9+ is installed. Run `pip install pandas MetaTrader5`.
+1.  **Environment:** Ensure Python 3.9+ is installed. Run `pip install pandas MetaTrader5 streamlit fastapi uvicorn`.
 2.  **Terminal Sync:** Open MetaTrader 5 and ensure you are logged into your XAUUSD broker.
-3.  **Data Generation:** Run `python main.py --mode research --refresh-data`. This builds the system's internal "maps."
-4.  **Verification:** Run `python main.py --mode summary --reuse-artifacts`. This gives you a quick health check of the current logic.
+3.  **Validation:** Run `python strategy/verify_env.py` to confirm terminal and directory readiness.
+4.  **Data Generation:** Run `python main.py --mode research --refresh-data`. This builds the system's internal "maps."
+5.  **Logic Test:** Run `python strategy/smoke_test.py` to ensure the strategy engine is healthy.
+6.  **Dashboard (Control Center):** Run `python strategy/start_dashboard.py` to launch the multi-mode dashboard in your browser.
 5.  **Live Guard:** Always run `python main.py --mode live` (Preview mode) before using the `--execute-live` flag.
 
 ---
@@ -43,6 +45,16 @@ To understand how data becomes a trade, follow this sequence every 5 minutes:
 | **Ranging** | Active (Score > 65) | Active | 1.0x (A) / 0.5x (B) |
 | **Choppy** | **HARD BLOCK** | Active (Exploratory) | 0.25x Total |
 | **Volatile** | Major Zones Only | Active (Exploratory) | 0.50x Total |
+
+---
+
+## 1.3 New York Session Protocol (Refactor V2.1)
+*   **QEAlpha (System A):** **DISABLED**. No trades allowed between 13:00 - 17:59.
+*   **QEFlowExp (System B):** **RESTRICTED DATA ENGINE**.
+    *   **Logic:** Requires ELITE Quality + Trending/Volatile State (Breakout logic).
+    *   **Conviction:** Confirm Score floor raised to 90.
+    *   **Risk:** Additional 0.5x dampener (Total 0.25x base exploratory risk).
+    *   **Capping:** Maximum 1 trade per NY session to prevent over-trading in volatility.
 
 ---
 

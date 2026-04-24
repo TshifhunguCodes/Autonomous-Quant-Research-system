@@ -1,6 +1,7 @@
 import pandas as pd
 
 from core.logging_utils import get_logger
+from strategy.decision_report import generate_decision_report, generate_stress_validation_report
 
 
 logger = get_logger(__name__)
@@ -122,5 +123,13 @@ def run(config, print_terminal: bool = False):
                 weak_setup=weak_setup,
             )
         )
+        
+        # Run and print final decision report layer
+        print(generate_decision_report(config))
+        
+        # If OOS artifacts exist, run the Stress Validation Report
+        oos_path = config.paths.backtest_summary.parent / "out_of_sample_summary.csv"
+        if oos_path.exists():
+            print(generate_stress_validation_report(config))
 
     return stats

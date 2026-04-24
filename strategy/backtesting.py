@@ -21,8 +21,8 @@ def _build_alpha_trade(row, config, equity):
     state = row.get("market_state", "UNKNOWN")
     score = float(row.get("confirm_score", 0))
     
-    # Filter 1: Elite Only + London/Asia Session Focus
-    if quality != "ELITE" or hour not in config.regime.alpha_session_hours:
+    # Filter 1: Elite Only + London/Asia Session Focus (NY Completely Disabled)
+    if quality != "ELITE" or hour not in config.regime.alpha_session_hours or 13 <= hour < 18:
         return None
         
     # Filter 2: Regime-based Conviction (Stability Enhancement)
@@ -41,8 +41,21 @@ def _build_alpha_trade(row, config, equity):
 
 def _build_flow_trade(row, config, equity):
     """System B: ADAPTIVE FLOW logic - Exploratory Data Engine Only"""
-    # Risk scaling: base lot × flow risk multiplier × 0.5 dampener
+    hour = pd.to_datetime(row["time"]).hour
+    is_ny = 13 <= hour < 18
+    state = row.get("market_state", "UNKNOWN")
+    quality = row.get("quality", "UNKNOWN")
+    score = float(row.get("confirm_score", 0))
+
+    # Base Risk scaling: base lot × flow risk multiplier × 0.5 dampener
     risk_adj = config.regime.flow_risk_multiplier * 0.5
+
+    # Strict NY Conditions for System B
+    if is_ny:
+        # NY Micro-Strategy: Only allow first breakouts during the 13:00 Power Hour
+        if hour != 13 or not bool(row.get("is_first_breakout", False)) or quality != "ELITE" or score < 90:
+            return None
+        risk_adj *= 0.5  # Additional 50% dampener for NY volatility
 
     # Broader quality acceptance, reduced risk
     trade = _build_trade_base(row, config, equity, risk_adj=risk_adj, is_exploratory=True)
@@ -162,6 +175,7 @@ def _build_trade_base(row, config, equity, risk_adj=1.0, is_exploratory=False):
         "risk_multiplier": float(row.get("risk_multiplier", 1.0) or 1.0),
         "risk_amount": risk_amount,
         "confirm_score": row.get("confirm_score", 0),
+        "is_first_breakout": bool(row.get("is_first_breakout", False)),
     }
 
 def _resolve_trade(trade, candle):
@@ -228,6 +242,7 @@ def _empty_trades_frame():
             "reentry_count",
             "pnl",
             "equity_after_trade",
+            "is_first_breakout",
         ]
     )
 
@@ -323,6 +338,8 @@ def run_backtest_frame(df, config, label="full_period", mode="COMBINED"):
     signal_entry_counts = {} # signal_time -> count
     alpha_history = []
     flow_history = []
+    ny_trade_date = None
+    ny_flow_count = 0
 
     for _, row in df.iterrows():
         current_time = row["time"]
@@ -414,6 +431,7 @@ def run_backtest_frame(df, config, label="full_period", mode="COMBINED"):
 
         if row["confirmed_signal"] not in {"buy", "sell"}:
             continue
+            
         signal_entry_counts[row["time"]] = 1
         
         # Dual-System Decision Engine
@@ -430,6 +448,18 @@ def run_backtest_frame(df, config, label="full_period", mode="COMBINED"):
 
         if candidate_trade is None:
             continue
+
+        # Session Capping for NY Flow Trades
+        hour = pd.to_datetime(current_time).hour
+        if not candidate_trade.get("system") == "ALPHA" and 13 <= hour < 18:
+            trade_date = pd.to_datetime(current_time).date()
+            if ny_trade_date != trade_date:
+                ny_trade_date = trade_date
+                ny_flow_count = 0
+            
+            if ny_flow_count >= getattr(config.regime, "max_ny_flow_trades", 1):
+                continue
+            ny_flow_count += 1
 
         candidate_trade["system_mode"] = mode
         active_trades.append(candidate_trade)
