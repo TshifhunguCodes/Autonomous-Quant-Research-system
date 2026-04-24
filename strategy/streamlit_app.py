@@ -30,9 +30,19 @@ def fetch_data_cached(endpoint, params_str):
 
 def fetch_data(endpoint, params=None):
     """Wrapper for cached data fetching"""
-    import json
-    params_str = json.dumps(params) if params else ""
-    return fetch_data_cached(endpoint, params_str)
+    if endpoint == "performance":
+        # Don't cache performance data as it changes frequently
+        try:
+            response = requests.get(f"{API_URL}/{endpoint}", params=params, timeout=5)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            st.toast(f"⚠️ {endpoint} unavailable", icon="⚠️")
+            return {}
+    else:
+        import json
+        params_str = json.dumps(params) if params else ""
+        return fetch_data_cached(endpoint, params_str)
 
 # Sidebar Navigation
 st.sidebar.title("🧠 AQRS V2 Dashboard")
@@ -40,8 +50,11 @@ page = st.sidebar.selectbox("Navigate", ["Main Dashboard", "Live Trades", "Syste
 refresh_rate = st.sidebar.slider("Refresh Rate (sec)", 1, 5, 2)
 
 def initialize_session_state():
+    # Check backend for existing replay state to survive refreshes
+    backend_state = fetch_data("replay_control", {"action": "status"})
+    
     if "mode" not in st.session_state:
-        st.session_state.mode = "LIVE"
+        st.session_state.mode = "REPLAY" if backend_state.get("running") else "LIVE"
     if "symbol" not in st.session_state:
         st.session_state.symbol = "XAUUSD" # Default, could be fetched from config
     if "refresh_rate" not in st.session_state:
@@ -49,19 +62,29 @@ def initialize_session_state():
 
     # Replay specific states
     if "replay_running" not in st.session_state:
-        st.session_state.replay_running = False
+        st.session_state.replay_running = backend_state.get("running", False)
     if "replay_index" not in st.session_state:
-        st.session_state.replay_index = 0
+        st.session_state.replay_index = backend_state.get("index", 0)
+    
+    # Restore dates from backend if available, otherwise use defaults
+    if "replay_start_date" not in st.session_state:
+        if backend_state.get("start_date"):
+            st.session_state.replay_start_date = datetime.strptime(backend_state["start_date"], "%Y-%m-%d").date()
+        else:
+            st.session_state.replay_start_date = (datetime.now() - timedelta(days=7)).date()
+            
+    if "replay_end_date" not in st.session_state:
+        if backend_state.get("end_date"):
+            st.session_state.replay_end_date = datetime.strptime(backend_state["end_date"], "%Y-%m-%d").date()
+        else:
+            st.session_state.replay_end_date = datetime.now().date()
+
     if "replay_speed" not in st.session_state:
         st.session_state.replay_speed = 1.0 # candles per second
-    if "replay_start_date" not in st.session_state:
-        st.session_state.replay_start_date = (datetime.now() - timedelta(days=7)).date()
-    if "replay_end_date" not in st.session_state:
-        st.session_state.replay_end_date = datetime.now().date()
-    if "replay_total_candles" not in st.session_state:
-        st.session_state.replay_total_candles = 0
-    if "replay_data_loaded" not in st.session_state:
-        st.session_state.replay_data_loaded = False
+    
+    # Sync metadata
+    st.session_state.replay_total_candles = backend_state.get("total_candles", 0)
+    st.session_state.replay_data_loaded = backend_state.get("data_loaded", False)
 
     # Backtest specific states
     if "backtest_running" not in st.session_state:
@@ -160,10 +183,13 @@ def render_top_bar():
     st.sidebar.info(f"Dashboard Refresh Rate: {st.session_state.refresh_rate} seconds")
 
 
-def render_market_panel(market_state_data):
+def render_market_panel(market_state_data, mode="LIVE", replay_index=0, total_candles=0):
     st.subheader("🌐 Global Market Intelligence")
     if not market_state_data:
-        st.info("🔄 Waiting for market data...")
+        if mode == "REPLAY":
+            st.info(f"🔄 Loading replay data... (Index: {replay_index}/{total_candles})")
+        else:
+            st.info("🔄 Waiting for market data...")
         return
 
     m = market_state_data
@@ -196,33 +222,72 @@ def render_market_panel(market_state_data):
     sig_color = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "⚪"
     c4.info(f"**Signal**\n{sig_color} `{signal}`")
 
-def render_dual_engine_panel(market_state_data):
+def render_dual_engine_panel(market_state_data, performance_data, trades_data, mode, replay_index=0, total_candles=0):
     st.subheader("⚙️ Dual Engine Decision System")
     if market_state_data:
         m = market_state_data
         col_alpha, col_flow = st.columns(2)
         
+        # Get performance stats based on mode
+        if mode == "LIVE":
+            alpha_perf = performance_data.get("ALPHA", {})
+            flow_perf = performance_data.get("FLOW_EXP", {})
+        elif mode == "REPLAY":
+            replay_perf = performance_data.get("REPLAY", {})
+            # For replay, show same for both since it's combined
+            alpha_perf = replay_perf
+            flow_perf = replay_perf
+        elif mode == "BACKTEST":
+            combined_perf = performance_data.get("COMBINED", {})
+            alpha_perf = combined_perf
+            flow_perf = combined_perf
+        else:
+            alpha_perf = {}
+            flow_perf = {}
+        
+        # Get active trades count
+        active_trades = trades_data.get("active", []) if trades_data else []
+        alpha_active = len([t for t in active_trades if t.get("comment", "").startswith("ALPHA")])
+        flow_active = len([t for t in active_trades if t.get("comment", "").startswith("FLOW")])
+        
         with col_alpha:
             with st.container(border=True):
                 st.markdown("### 🎯 ALPHA (Sniper Strategy)")
-                alpha_score = m.get("alpha_score", 0)
-                score_color = "🟢" if alpha_score > 75 else "🟡" if alpha_score > 50 else "🔴"
-                st.write(f"**Conviction Score:** {score_color} {alpha_score}/100")
                 st.write(f"**Signal:** `{m.get('confirmed_signal', 'NONE').upper()}`")
                 st.write(f"**Setup:** `{m.get('setup', 'N/A').upper()}`")
                 st.write(f"**Current Price:** `{m.get('current_price', 'N/A')}`")
+                st.write(f"**Trades Open:** {alpha_active}")
+                alpha_wins = int(alpha_perf.get('wins', 0))
+                alpha_losses = int(alpha_perf.get('losses', 0))
+                alpha_total = int(alpha_perf.get('trades', 0))
+                # If losses not explicitly set but we have trades and wins, calculate losses
+                if alpha_losses == 0 and alpha_total > 0 and alpha_wins < alpha_total:
+                    alpha_losses = alpha_total - alpha_wins
+                st.write(f"**Trades Won:** {alpha_wins}")
+                st.write(f"**Trades Lost:** {alpha_losses}")
+                st.write(f"**Net PnL:** ${alpha_perf.get('pnl', 0):,.2f}")
         
         with col_flow:
             with st.container(border=True):
                 st.markdown("### 🌊 FLOW (Exploratory Strategy)")
-                flow_score = m.get("flow_score", 0)
-                score_color = "🟢" if flow_score > 75 else "🟡" if flow_score > 50 else "🔴"
-                st.write(f"**Conviction Score:** {score_color} {flow_score}/100")
                 st.write(f"**Signal:** `{m.get('confirmed_signal', 'NONE').upper()}`")
                 st.write(f"**Regime:** `{m.get('regime', 'N/A').upper()}`")
                 st.write(f"**Market State:** `{m.get('state', 'N/A').upper()}`")
+                st.write(f"**Trades Open:** {flow_active}")
+                flow_wins = int(flow_perf.get('wins', 0))
+                flow_losses = int(flow_perf.get('losses', 0))
+                flow_total = int(flow_perf.get('trades', 0))
+                # If losses not explicitly set but we have trades and wins, calculate losses
+                if flow_losses == 0 and flow_total > 0 and flow_wins < flow_total:
+                    flow_losses = flow_total - flow_wins
+                st.write(f"**Trades Won:** {flow_wins}")
+                st.write(f"**Trades Lost:** {flow_losses}")
+                st.write(f"**Net PnL:** ${flow_perf.get('pnl', 0):,.2f}")
     else:
-        st.info("🔄 Waiting for engine decisions...")
+        if mode == "REPLAY":
+            st.info(f"🔄 Loading engine decisions... (Index: {replay_index}/{total_candles})")
+        else:
+            st.info("🔄 Waiting for engine decisions...")
 
 def render_active_trades_panel(active_trades):
     st.subheader("🚀 Active Positions")
@@ -482,11 +547,11 @@ def main():
 
     # Full-width layout - everything stacked vertically
     # 1. Global Market Intelligence
-    render_market_panel(state_data.get("market") if state_data else None)
+    render_market_panel(state_data.get("market") if state_data else None, st.session_state.mode, st.session_state.replay_index if st.session_state.mode == "REPLAY" else 0, st.session_state.replay_total_candles if st.session_state.mode == "REPLAY" else 0)
     st.divider()
     
     # 2. Dual Engine Decision System
-    render_dual_engine_panel(state_data.get("market") if state_data else None)
+    render_dual_engine_panel(state_data.get("market") if state_data else None, performance_data, trades_data, st.session_state.mode, st.session_state.replay_index if st.session_state.mode == "REPLAY" else 0, st.session_state.replay_total_candles if st.session_state.mode == "REPLAY" else 0)
     st.divider()
     
     # 3. Candlestick Chart
@@ -508,11 +573,15 @@ def main():
     if st.session_state.mode == "LIVE" or (st.session_state.mode == "REPLAY" and st.session_state.replay_running and st.session_state.replay_data_loaded):
         # Increment replay index for next iteration
         if st.session_state.mode == "REPLAY" and st.session_state.replay_running:
-            st.session_state.replay_index += 1
-            # Send updated index to backend for its internal state management
-            fetch_data("replay_control", {"action": "step", "index": st.session_state.replay_index})
+            # Check bounds before incrementing
+            if st.session_state.replay_index < st.session_state.replay_total_candles:
+                st.session_state.replay_index += 1
+                # Send updated index to backend for its internal state management
+                fetch_data("replay_control", {"action": "step", "index": st.session_state.replay_index})
+            
+            # Stop replay if we've reached the end
             if st.session_state.replay_index >= st.session_state.replay_total_candles:
-                st.session_state.replay_running = False # Stop replay at end
+                st.session_state.replay_running = False
                 st.info("🏁 Replay finished!")
 
         time.sleep(1.0 / st.session_state.replay_speed if st.session_state.mode == "REPLAY" else st.session_state.refresh_rate)

@@ -28,6 +28,12 @@ def get_state(mode: str = "LIVE", replay_index: int = 0):
     account_info = {}
     if mode == "LIVE":
         account_info = state_manager.get_mt5_account_info()
+    
+    # Ensure we always return valid data structure for REPLAY mode
+    if mode == "REPLAY" and not market_state:
+        logger.warning(f"Empty market state for REPLAY mode at index {replay_index}. Total decisions: {len(state_manager.replay_data.get('decisions', []))}, Total ohlc: {len(state_manager.replay_ohlc)}")
+        market_state = {}
+    
     return {
         "market": market_state,
         "account": account_info
@@ -81,10 +87,16 @@ def replay_control(action: str, start_date: str = None, end_date: str = None, in
         replay_state["start_date"] = date.fromisoformat(start_date)
         replay_state["end_date"] = date.fromisoformat(end_date)
         
-        # Trigger main.py --mode replay in a subprocess
+        # Trigger main.py --mode replay
+        # Added --refresh-data to ensure the 'Timeline of Choice' is actually fetched from MT5
         cmd = ["python", "main.py", "--mode", "replay",
-               "--replay-start", start_date, "--replay-end", end_date]
-        subprocess.Popen(cmd) # Non-blocking call
+               "--replay-start", start_date, "--replay-end", end_date, "--refresh-data"]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.error(f"Replay failed: {result.stderr}")
+            replay_state["running"] = False
+            replay_state["data_loaded"] = False
+            return {"total_candles": 0, "data_loaded": False}
         
         # Load the generated replay data
         if state_manager._load_replay_data(replay_state["start_date"], replay_state["end_date"]):

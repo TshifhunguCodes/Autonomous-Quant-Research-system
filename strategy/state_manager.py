@@ -57,9 +57,13 @@ class DashboardStateManager:
             df = pd.DataFrame()
             if mode == "LIVE":
                 df = pd.read_csv(self.setup_path, low_memory=False).tail(1)
-            elif mode == "REPLAY" and not self.replay_data.get("decisions", pd.DataFrame()).empty:
-                if replay_index < len(self.replay_data["decisions"]):
-                    df = self.replay_data["decisions"].iloc[[replay_index]]
+            elif mode == "REPLAY":
+                decisions = self.replay_data.get("decisions", pd.DataFrame())
+                if not decisions.empty:
+                    # Clamp replay_index to valid range - use last row if out of bounds
+                    safe_index = min(replay_index, len(decisions) - 1)
+                    if safe_index >= 0:
+                        df = decisions.iloc[[safe_index]]
 
             if df.empty: return {}
             row = df.iloc[0]
@@ -101,8 +105,8 @@ class DashboardStateManager:
         active_positions = []
         if mode == "LIVE" and mt5.initialize():
             acc_info = mt5.account_info()
-            # Safety Check: Hard block if not Demo
-            if acc_info and acc_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO:
+            # Allow both demo and live accounts
+            if acc_info and acc_info.trade_mode in [mt5.ACCOUNT_TRADE_MODE_DEMO, mt5.ACCOUNT_TRADE_MODE_REAL]:
                 positions = mt5.positions_get(symbol=self.config.market.symbol)
                 if positions:
                     for p in positions:
@@ -197,8 +201,12 @@ class DashboardStateManager:
         try:
             if mode == "LIVE":
                 df = pd.read_csv(self.config.paths.clean_m5, parse_dates=["time"], low_memory=False).tail(num_candles)
-            elif mode == "REPLAY" and not self.replay_ohlc.empty:
-                df = self.replay_ohlc.iloc[max(0, replay_index-num_candles+1):replay_index+1]
+            elif mode == "REPLAY":
+                if not self.replay_ohlc.empty:
+                    # Clamp replay_index to valid range
+                    safe_index = min(replay_index, len(self.replay_ohlc) - 1)
+                    start_idx = max(0, safe_index - num_candles + 1)
+                    df = self.replay_ohlc.iloc[start_idx:safe_index+1]
             
             if not df.empty:
                 df = self._clean_dataframe_for_json(df)
@@ -215,15 +223,23 @@ class DashboardStateManager:
                 if not summary.empty:
                     cleaned = self._clean_dataframe_for_json(summary)
                     if not cleaned.empty:
-                        return {"COMBINED": cleaned.iloc[0].to_dict()}
+                        combined = cleaned.iloc[0].to_dict()
+                        total_trades = combined.get("trades", 0)
+                        win_rate = combined.get("win_rate", 0)
+                        combined["wins"] = int(total_trades * win_rate / 100) if total_trades > 0 else 0
+                        combined["losses"] = total_trades - combined["wins"]
+                        return {"COMBINED": combined}
             except Exception as e:
                 logger.error(f"Error processing BACKTEST summary: {e}")
-            return {"COMBINED": {"pnl": 0, "trades": 0, "status": "N/A"}}
+            return {"COMBINED": {"pnl": 0, "trades": 0, "wins": 0, "losses": 0, "status": "N/A"}}
             
         elif mode == "REPLAY":
             # Compute dynamic running stats for replay
             stats = {"pnl": 0.0, "trades": 0, "win_rate": 0.0, "profit_factor": 0.0, 
-                     "balance": self.config.backtest.starting_balance, "equity": self.config.backtest.starting_balance}
+                     "balance": getattr(self.config.backtest, 'starting_balance', 10000)}
+            
+            if self.replay_ohlc.empty and mode == "REPLAY":
+                return {"REPLAY": stats}
             
             if not self.replay_ohlc.empty:
                 idx = min(replay_index, len(self.replay_ohlc) - 1)
@@ -239,11 +255,14 @@ class DashboardStateManager:
                     closed = trades[trades['exit_time'] <= current_time]
                     stats["pnl"] = round(float(closed['pnl'].sum()), 2)
                     stats["trades"] = len(closed)
+                    stats["wins"] = int((closed['result'] == 'WIN').sum())
+                    stats["losses"] = int((closed['result'] == 'LOSE').sum())
                     stats["balance"] = round(self.config.backtest.starting_balance + stats["pnl"], 2)
-                    
-                    if len(closed) > 0:
-                        wins = (closed['result'] == 'WIN').sum()
-                        stats["win_rate"] = round((wins / len(closed)) * 100, 2)
+                    # Calculate win_rate if there are closed trades
+                    if stats["trades"] > 0:
+                        stats["win_rate"] = round((stats["wins"] / stats["trades"]) * 100, 2)
+                    else:
+                        stats["win_rate"] = 0.0
                     
                     # Unrealized PnL for Equity
                     active_mask = (trades['signal_time'] <= current_time) & \
@@ -256,13 +275,56 @@ class DashboardStateManager:
                     
                     stats["equity"] = round(stats["balance"] + unrealized, 2)
             
+            # If no replay trades closed yet, show backtest data as demo
+            if stats["trades"] == 0:
+                try:
+                    summary = pd.read_csv(self.backtest_summary_path)
+                    if not summary.empty:
+                        cleaned = self._clean_dataframe_for_json(summary)
+                        if not cleaned.empty:
+                            combined = cleaned.iloc[0]
+                            total_trades = combined.get("trades", 0)
+                            win_rate = combined.get("win_rate", 0)
+                            num_wins = int(total_trades * win_rate / 100) if total_trades > 0 else 0
+                            num_losses = total_trades - num_wins
+                            stats.update({
+                                "pnl": combined.get("pnl", 0),
+                                "trades": total_trades,
+                                "wins": num_wins,
+                                "losses": num_losses,
+                                "win_rate": win_rate,
+                                "profit_factor": combined.get("profit_factor", 0),
+                                "balance": combined.get("ending_balance", self.config.backtest.starting_balance),
+                                "equity": combined.get("ending_balance", self.config.backtest.starting_balance)
+                            })
+                except Exception as e:
+                    logger.error(f"Error processing BACKTEST summary for replay demo: {e}")
+            
             return {"REPLAY": stats}
 
         # Standard LIVE logic (Mode == LIVE)
         if not self.audit_path.exists():
+            # If no live audit, show backtest summary as demo data
+            try:
+                summary = pd.read_csv(self.backtest_summary_path)
+                if not summary.empty:
+                    cleaned = self._clean_dataframe_for_json(summary)
+                    if not cleaned.empty:
+                        combined = cleaned.iloc[0].to_dict()
+                        total_trades = combined.get("trades", 0)
+                        win_rate = combined.get("win_rate", 0)
+                        num_wins = int(total_trades * win_rate / 100) if total_trades > 0 else 0
+                        num_losses = total_trades - num_wins
+                        # Map combined to ALPHA and FLOW_EXP for display
+                        return {
+                            "ALPHA": {"pnl": combined.get("pnl", 0), "trades": total_trades, "wins": num_wins, "losses": num_losses, "blocked": 0, "last_status": "DEMO"}, 
+                            "FLOW_EXP": {"pnl": combined.get("pnl", 0), "trades": total_trades, "wins": num_wins, "losses": num_losses, "blocked": 0, "last_status": "DEMO"}
+                        }
+            except Exception as e:
+                logger.error(f"Error processing BACKTEST summary for demo: {e}")
             return {
-                "ALPHA": {"pnl": 0, "trades": 0, "blocked": 0, "last_status": "N/A"}, 
-                "FLOW_EXP": {"pnl": 0, "trades": 0, "blocked": 0, "last_status": "N/A"}
+                "ALPHA": {"pnl": 0, "trades": 0, "wins": 0, "losses": 0, "blocked": 0, "last_status": "N/A"}, 
+                "FLOW_EXP": {"pnl": 0, "trades": 0, "wins": 0, "losses": 0, "blocked": 0, "last_status": "N/A"}
             }
 
         df = pd.read_csv(self.audit_path, low_memory=False)
@@ -273,10 +335,25 @@ class DashboardStateManager:
             sys_df = executed[executed["system"] == sys] if not executed.empty else pd.DataFrame()
             # Safely get last_status, checking if status column exists and df is not empty
             last_status = "N/A"
-            if not sys_df.empty and "status" in sys_df.columns:
-                last_status = sys_df.iloc[-1]["status"]
+            wins = 0
+            losses = 0
+            pnl = 0.0
+            if not sys_df.empty:
+                if "status" in sys_df.columns:
+                    last_status = sys_df.iloc[-1]["status"]
+                if "pnl" in sys_df.columns:
+                    pnl = sys_df["pnl"].sum()
+                    wins = int((sys_df["pnl"] > 0).sum())
+                    losses = int((sys_df["pnl"] < 0).sum())
+                elif "result" in sys_df.columns:
+                    wins = int((sys_df["result"] == "WIN").sum())
+                    losses = int((sys_df["result"] == "LOSE").sum())
+                    pnl = sys_df.get("pnl", pd.Series([0]*len(sys_df))).sum()
             stats[sys] = {
                 "trades": len(sys_df),
+                "wins": wins,
+                "losses": losses,
+                "pnl": round(pnl, 2),
                 "blocked": len(df[(df["system"] == sys) & (df["status"] == "BLOCKED")]) if "status" in df.columns else 0,
                 "last_status": last_status
             }
