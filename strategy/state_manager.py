@@ -35,6 +35,14 @@ class DashboardStateManager:
             if self.config.paths.replay_trades.exists():
                 self.replay_trades = pd.read_csv(self.config.paths.replay_trades, parse_dates=['signal_time', 'exit_time'], low_memory=False)
 
+            if self.replay_ohlc.empty or decisions.empty:
+                logger.warning(
+                    "No replay data available for the selected timeframe: %s to %s",
+                    start_date,
+                    end_date,
+                )
+                return False
+
             self.replay_data = {"decisions": self._clean_dataframe_for_json(decisions)}
             return True
         except Exception as e:
@@ -79,8 +87,9 @@ class DashboardStateManager:
                     return val.item()
                 return val
 
-            alpha_score = safe_get(row, "confirm_score") if safe_get(row, "quality") == "ELITE" else 0
-            flow_score = safe_get(row, "confirm_score")
+            # V3 Scoring Logic
+            alpha_score = safe_get(row, "alpha_score", 0)
+            flow_score = safe_get(row, "flow_score", 0)
 
             return {
                 "time": safe_get(row, "time"),
@@ -89,11 +98,11 @@ class DashboardStateManager:
                 "state": safe_get(row, "market_state", "UNKNOWN"),
                 "session": safe_get(row, "session", "UNKNOWN"),
                 "h1_bias": safe_get(row, "h1_bias", "UNKNOWN"),
-                "volatility": safe_get(row, "market_state", "UNKNOWN"),
+                "volatility": "HIGH" if safe_get(row, "volatility", 0) == 1 else "NORMAL",
                 "alpha_score": alpha_score,
                 "flow_score": flow_score,
                 "current_price": safe_get(row, "close"),
-                "current_zone": f"S:{safe_get(row, 'near_support')} R:{safe_get(row, 'near_resistance')}",
+                "current_zone": f"S:{safe_get(row, 'support_level'):.2f} R:{safe_get(row, 'resistance_level'):.2f}",
                 "setup": safe_get(row, "setup", "NONE"),
                 "confirmed_signal": safe_get(row, "confirmed_signal", "none").upper()
             }

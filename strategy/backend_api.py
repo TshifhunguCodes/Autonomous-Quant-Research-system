@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+import sys
 import pandas as pd
 from strategy.state_manager import DashboardStateManager
 from core.logging_utils import get_logger
@@ -82,15 +83,24 @@ def get_chart_data(mode: str = "LIVE", replay_index: int = 0, num_candles: int =
 def replay_control(action: str, start_date: str = None, end_date: str = None, index: int = 0):
     global replay_state
     if action == "start":
+        if not start_date or not end_date:
+            return {"error": "Missing replay start/end dates", "total_candles": 0, "data_loaded": False}
+        try:
+            start_dt = date.fromisoformat(start_date)
+            end_dt = date.fromisoformat(end_date)
+        except ValueError:
+            return {"error": "Invalid date format. Use YYYY-MM-DD.", "total_candles": 0, "data_loaded": False}
+        if start_dt > end_dt:
+            return {"error": "Replay start date must be on or before end date.", "total_candles": 0, "data_loaded": False}
+
         replay_state["running"] = True
         replay_state["index"] = 0
-        replay_state["start_date"] = date.fromisoformat(start_date)
-        replay_state["end_date"] = date.fromisoformat(end_date)
+        replay_state["start_date"] = start_dt
+        replay_state["end_date"] = end_dt
         
-        # Trigger main.py --mode replay
-        # Added --refresh-data to ensure the 'Timeline of Choice' is actually fetched from MT5
-        cmd = ["python", "main.py", "--mode", "replay",
-               "--replay-start", start_date, "--replay-end", end_date, "--refresh-data"]
+        # V3 Migration: Use main_v3.py for replay generation
+        cmd = [sys.executable, "main_v3.py", "--mode", "replay",
+               "--replay-start", start_date, "--replay-end", end_date, "--output", "data/replay/replay_decisions.csv"]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             logger.error(f"Replay failed: {result.stderr}")
@@ -124,9 +134,9 @@ def replay_control(action: str, start_date: str = None, end_date: str = None, in
 @app.get("/backtest_control")
 def backtest_control(action: str, start_date: str = None, end_date: str = None):
     if action == "run":
-        # Trigger main.py --mode backtest in a subprocess
-        cmd = ["python", "main.py", "--mode", "backtest", "--refresh-data",
-               "--in-sample-end", start_date, "--oos-start", end_date] # Using IS/OOS for date range
+        # V3 Migration: Use main_v3.py for institutional backtests
+        cmd = [sys.executable, "main_v3.py", "--mode", "backtest", 
+               "--output", "data/backtest/v3_research_output.csv"]
         subprocess.Popen(cmd) # Non-blocking call
         return {"status": "Backtest started", "command": " ".join(cmd)}
     return {"status": "Invalid action"}

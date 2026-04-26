@@ -137,6 +137,14 @@ python main.py --mode live --execute-live
 
 ## 5. Risk & Safety Mechanisms
 
+### 5.0 Current Fixes
+*   The V3 backtest engine now resolves `ALPHA` and `FLOW` trades using actual candle price paths rather than random binomial outcomes.
+*   The replay engine now treats break-even exits as commission-only events, avoiding the previous full-risk loss penalty on `BE` closes.
+
+---
+
+## 5. Risk & Safety Mechanisms
+
 ### 5.1 The Elite Paradox Filter
 The system monitors `confirm_score`. If a score exceeds **100**, it is flagged as "too perfect," indicating potential exhaustion or price climax, and the trade is blocked.
 

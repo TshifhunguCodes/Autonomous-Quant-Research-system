@@ -46,6 +46,8 @@ python main.py --mode replay --replay-max-candles 250
 - Added live trading controls for quality threshold, H1 alignment, spread, stale signals, duplicate candles, and preview-only execution.
 - V2 research artifacts now live in `data/research/`, so the old `data/features/` files remain untouched.
 - Added a candle-by-candle replay engine with `replay_decisions.csv`, `replay_events.csv`, `replay_trades.csv`, and `replay_summary.csv`.
+- Fixed replay backtesting so break-even exits (`BE`) are recorded as commission-only scratches instead of full losses.
+- Replaced the legacy probabilistic backtest outcome simulation with deterministic, price-based trade resolution in `backtesting/backtest_engine.py`.
 
 ## Key Files
 

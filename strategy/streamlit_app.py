@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 import numpy as np
 from functools import lru_cache
 
-st.set_page_config(page_title="AQRS V2 Dashboard", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="AQRS V3 Dashboard", layout="wide", initial_sidebar_state="expanded")
 
 API_URL = "http://127.0.0.1:8001"
 
@@ -45,7 +45,7 @@ def fetch_data(endpoint, params=None):
         return fetch_data_cached(endpoint, params_str)
 
 # Sidebar Navigation
-st.sidebar.title("🧠 AQRS V2 Dashboard")
+st.sidebar.title("🧠 AQRS V3 Dashboard")
 page = st.sidebar.selectbox("Navigate", ["Main Dashboard", "Live Trades", "System Comparison", "Audit Logs"])
 refresh_rate = st.sidebar.slider("Refresh Rate (sec)", 1, 5, 2)
 
@@ -72,12 +72,18 @@ def initialize_session_state():
             st.session_state.replay_start_date = datetime.strptime(backend_state["start_date"], "%Y-%m-%d").date()
         else:
             st.session_state.replay_start_date = (datetime.now() - timedelta(days=7)).date()
-            
     if "replay_end_date" not in st.session_state:
         if backend_state.get("end_date"):
             st.session_state.replay_end_date = datetime.strptime(backend_state["end_date"], "%Y-%m-%d").date()
         else:
             st.session_state.replay_end_date = datetime.now().date()
+
+    # Keep the UI aligned with backend replay range when a replay is already loaded
+    if backend_state.get("start_date") and backend_state.get("end_date"):
+        backend_start = datetime.strptime(backend_state["start_date"], "%Y-%m-%d").date()
+        backend_end = datetime.strptime(backend_state["end_date"], "%Y-%m-%d").date()
+        st.session_state.replay_start_date = backend_start
+        st.session_state.replay_end_date = backend_end
 
     if "replay_speed" not in st.session_state:
         st.session_state.replay_speed = 1.0 # candles per second
@@ -96,7 +102,7 @@ def initialize_session_state():
 
 # --- UI Components ---
 def render_top_bar():
-    st.sidebar.title("🧠 AQRS V2 Control Center")
+    st.sidebar.title("🧠 AQRS V3 Control Center")
 
     st.session_state.mode = st.sidebar.radio(
         "Select Mode", ["LIVE", "REPLAY", "BACKTEST"],
@@ -253,9 +259,9 @@ def render_dual_engine_panel(market_state_data, performance_data, trades_data, m
         with col_alpha:
             with st.container(border=True):
                 st.markdown("### 🎯 ALPHA (Sniper Strategy)")
+                st.metric("Conviction Score", f"{m.get('alpha_score', 0)}/100")
                 st.write(f"**Signal:** `{m.get('confirmed_signal', 'NONE').upper()}`")
-                st.write(f"**Setup:** `{m.get('setup', 'N/A').upper()}`")
-                st.write(f"**Current Price:** `{m.get('current_price', 'N/A')}`")
+                st.write(f"**Structure:** `{m.get('state', 'N/A')}`")
                 st.write(f"**Trades Open:** {alpha_active}")
                 alpha_wins = int(alpha_perf.get('wins', 0))
                 alpha_losses = int(alpha_perf.get('losses', 0))
@@ -270,9 +276,9 @@ def render_dual_engine_panel(market_state_data, performance_data, trades_data, m
         with col_flow:
             with st.container(border=True):
                 st.markdown("### 🌊 FLOW (Exploratory Strategy)")
+                st.metric("Exploration Score", f"{m.get('flow_score', 0)}/100")
                 st.write(f"**Signal:** `{m.get('confirmed_signal', 'NONE').upper()}`")
-                st.write(f"**Regime:** `{m.get('regime', 'N/A').upper()}`")
-                st.write(f"**Market State:** `{m.get('state', 'N/A').upper()}`")
+                st.write(f"**Regime:** `{m.get('regime', 'N/A')}`")
                 st.write(f"**Trades Open:** {flow_active}")
                 flow_wins = int(flow_perf.get('wins', 0))
                 flow_losses = int(flow_perf.get('losses', 0))
@@ -543,7 +549,7 @@ def main():
 
     # Main title with mode indicator
     mode_emoji = {"LIVE": "🔴", "REPLAY": "🔄", "BACKTEST": "📊"}
-    st.title(f"{mode_emoji.get(st.session_state.mode, '📡')} AQRS V2 Dashboard - {st.session_state.mode} Mode")
+    st.title(f"{mode_emoji.get(st.session_state.mode, '📡')} AQRS V3 Dashboard - {st.session_state.mode} Mode")
 
     # Full-width layout - everything stacked vertically
     # 1. Global Market Intelligence

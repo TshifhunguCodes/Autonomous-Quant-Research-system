@@ -1,0 +1,2 @@
+time,signal_time,symbol,side,system,regime,setup,is_exploratory,lot,price,status,retcode,comment
+2026-04-26 11:32:13.120416,2026-04-24 22:55:00,XAUUSD,BUY,NONE,CHOPPY,BUY_SETUP,True,0,0,BLOCKED,COST_TO_REWARD_REJECTION,

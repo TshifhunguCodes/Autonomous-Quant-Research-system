@@ -22,6 +22,12 @@ def build_m5_features(df_m5: pd.DataFrame) -> pd.DataFrame:
         )
     )
     df["atr"] = df["tr"].rolling(14).mean()
+
+    df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
+    df["ema_slope"] = df["ema20"].diff()
+    df["rsi"] = compute_rsi(df["close"], period=14)
+    df["atr_expansion"] = df["atr"] > df["atr"].rolling(20).mean() * 1.1
+    df["momentum_strength"] = df["momentum"].abs() > df["momentum"].rolling(14).mean()
     
     return df
 
@@ -79,6 +85,17 @@ def merge_h1_context_into_m5(
     )
 
 
+def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(50)
+
+
 def build_structure(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["prev_high"] = out["high"].shift(1)
@@ -91,6 +108,49 @@ def build_structure(df: pd.DataFrame) -> pd.DataFrame:
         "bullish",
         np.where(out["bos_down"] == 1, "bearish", "neutral"),
     )
+
+    out["swing_high"] = (
+        (out["high"] > out["high"].shift(1))
+        & (out["high"] > out["high"].shift(-1))
+    )
+    out["swing_low"] = (
+        (out["low"] < out["low"].shift(1))
+        & (out["low"] < out["low"].shift(-1))
+    )
+    out["swing_high_value"] = out["high"].where(out["swing_high"])
+    out["swing_low_value"] = out["low"].where(out["swing_low"])
+    out["last_swing_high"] = out["swing_high_value"].ffill()
+    out["last_swing_low"] = out["swing_low_value"].ffill()
+    out["prev_swing_high"] = out["last_swing_high"].shift(1)
+    out["prev_swing_low"] = out["last_swing_low"].shift(1)
+
+    bullish_structure = (
+        out["last_swing_high"] > out["prev_swing_high"]
+    ) & (
+        out["last_swing_low"] > out["prev_swing_low"]
+    )
+    bearish_structure = (
+        out["last_swing_high"] < out["prev_swing_high"]
+    ) & (
+        out["last_swing_low"] < out["prev_swing_low"]
+    )
+
+    out["structure_phase"] = "TRANSITION"
+    out.loc[bullish_structure, "structure_phase"] = "BULLISH"
+    out.loc[bearish_structure, "structure_phase"] = "BEARISH"
+
+    out["structure_label"] = "NEUTRAL"
+    out.loc[bullish_structure, "structure_label"] = "HH"
+    out.loc[bearish_structure, "structure_label"] = "LL"
+    out.loc[
+        (out["last_swing_low"] > out["prev_swing_low"]) & (out["last_swing_high"] <= out["prev_swing_high"]),
+        "structure_label",
+    ] = "HL"
+    out.loc[
+        (out["last_swing_high"] < out["prev_swing_high"]) & (out["last_swing_low"] >= out["prev_swing_low"]),
+        "structure_label",
+    ] = "LH"
+
     return out
 
 
@@ -191,56 +251,6 @@ def build_regime_layer(df: pd.DataFrame, config) -> pd.DataFrame:
     return out
 
 
-def build_signals(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    out["score"] = 0
-    out.loc[out["trend"] == "bullish", "score"] += 20
-    out.loc[out["trend"] == "bearish", "score"] += 20
-    out.loc[out["near_support"] == 1, "score"] += 20
-    out.loc[out["near_resistance"] == 1, "score"] += 20
-    out.loc[out["market_state"] == "TRENDING", "score"] += 15
-    out.loc[out["market_state"] == "RANGING", "score"] += 8
-    out.loc[out["market_state"] == "VOLATILE", "score"] += 5
-
-    if "volume_spike" in out.columns:
-        out.loc[out["volume_spike"] == True, "score"] += 7
-
-    lower_wick = out["open"].combine(out["close"], min) - out["low"]
-    upper_wick = out["high"] - out["open"].combine(out["close"], max)
-    out.loc[lower_wick > (out["high"] - out["low"]) * 0.4, "score"] += 10
-    out.loc[upper_wick > (out["high"] - out["low"]) * 0.4, "score"] += 10
-
-    if "hour" in out.columns:
-        out.loc[out["hour"].between(7, 16), "score"] += 8
-
-    out["h1_alignment"] = 0
-    if "h1_bias" in out.columns:
-        bullish_alignment = (
-            (out["trend"] == "bullish") & (out["h1_bias"] == "bullish")
-        )
-        bearish_alignment = (
-            (out["trend"] == "bearish") & (out["h1_bias"] == "bearish")
-        )
-        out.loc[bullish_alignment | bearish_alignment, "h1_alignment"] = 1
-        out.loc[out["h1_alignment"] == 1, "score"] += 12
-
-    out["signal"] = "NO_TRADE"
-    out.loc[out["score"] >= 80, "signal"] = "A_SETUP"
-    out.loc[(out["score"] >= 65) & (out["score"] < 80), "signal"] = "B_SETUP"
-    out.loc[(out["score"] >= 50) & (out["score"] < 65), "signal"] = "C_SETUP"
-
-    buy_bias = (out["near_support"] == 1) & (out["trend"] == "bullish")
-    sell_bias = (out["near_resistance"] == 1) & (out["trend"] == "bearish")
-
-    if "h1_bias" in out.columns:
-        buy_bias &= out["h1_bias"] == "bullish"
-        sell_bias &= out["h1_bias"] == "bearish"
-
-    out["bias"] = "NONE"
-    out.loc[buy_bias, "bias"] = "BUY"
-    out.loc[sell_bias, "bias"] = "SELL"
-    return out
-
 
 def build_setups(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -326,12 +336,14 @@ def build_confirmations(df: pd.DataFrame) -> pd.DataFrame:
     out.loc[buy_mask & (out["major_support"] == 1), "confirm_score"] += 20
     if "h1_bias" in out.columns:
         out.loc[buy_mask & (out["h1_bias"] == "bullish"), "confirm_score"] += 10
+    # Reward stronger setups to catch higher-quality trade opportunities earlier
+    out.loc[buy_mask & (out["setup_score"] >= 65), "confirm_score"] += 5
+    out.loc[sell_mask & (out["setup_score"] >= 65), "confirm_score"] += 5
+
     out.loc[
-        (out["confirm_score"] >= 55) & (out["setup"] == "BUY_SETUP"),
+        (out["confirm_score"] >= 40) & (out["setup"] == "BUY_SETUP"),
         "confirmed_signal",
     ] = "buy"
-
-    out.loc[sell_mask & (out["upper_wick"] > out["body"]) & (~out["is_indecision"]), "confirm_score"] += 20
     out.loc[sell_mask & out["is_indecision"], "confirm_score"] -= 15
     out.loc[sell_mask & out["is_climax"], "confirm_score"] -= 20
     
@@ -349,11 +361,126 @@ def build_confirmations(df: pd.DataFrame) -> pd.DataFrame:
     if "h1_bias" in out.columns:
         out.loc[sell_mask & (out["h1_bias"] == "bearish"), "confirm_score"] += 10
     out.loc[
-        (out["confirm_score"] >= 55) & (out["setup"] == "SELL_SETUP"),
+        (out["confirm_score"] >= 40) & (out["setup"] == "SELL_SETUP"),
         "confirmed_signal",
     ] = "sell"
 
     out["quality"] = out["confirm_score"].apply(classify_trade)
+    return out
+
+
+def build_signals(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out["score"] = 0
+    out.loc[out["trend"] == "bullish", "score"] += 20
+    out.loc[out["trend"] == "bearish", "score"] += 20
+    out.loc[out["near_support"] == 1, "score"] += 20
+    out.loc[out["near_resistance"] == 1, "score"] += 20
+    out.loc[out["market_state"] == "TRENDING", "score"] += 15
+    out.loc[out["market_state"] == "RANGING", "score"] += 8
+    out.loc[out["market_state"] == "VOLATILE", "score"] += 5
+
+    if "volume_spike" in out.columns:
+        out.loc[out["volume_spike"] == True, "score"] += 7
+
+    lower_wick = out["open"].combine(out["close"], min) - out["low"]
+    upper_wick = out["high"] - out["open"].combine(out["close"], max)
+    out.loc[lower_wick > (out["high"] - out["low"]) * 0.4, "score"] += 10
+    out.loc[upper_wick > (out["high"] - out["low"]) * 0.4, "score"] += 10
+
+    if "hour" in out.columns:
+        out.loc[out["hour"].between(7, 16), "score"] += 8
+
+    out["h1_alignment"] = 0
+    if "h1_bias" in out.columns:
+        bullish_alignment = (
+            (out["trend"] == "bullish") & (out["h1_bias"] == "bullish")
+        )
+        bearish_alignment = (
+            (out["trend"] == "bearish") & (out["h1_bias"] == "bearish")
+        )
+        out.loc[bullish_alignment | bearish_alignment, "h1_alignment"] = 1
+        out.loc[out["h1_alignment"] == 1, "score"] += 12
+
+    out["pattern"] = "NONE"
+    if "structure_phase" in out.columns:
+        out.loc[out["structure_phase"] == "BULLISH", "score"] += 10
+        out.loc[out["structure_phase"] == "BEARISH", "score"] += 10
+        out.loc[out["structure_phase"] == "TRANSITION", "score"] += 4
+
+    if "near_support" in out.columns:
+        out.loc[
+            (out["structure_phase"] == "BULLISH")
+            & (out["near_support"] == 1)
+            & (out["trend"] == "bullish"),
+            "pattern",
+        ] = "BULLISH_RETEST"
+    if "near_resistance" in out.columns:
+        out.loc[
+            (out["structure_phase"] == "BEARISH")
+            & (out["near_resistance"] == 1)
+            & (out["trend"] == "bearish"),
+            "pattern",
+        ] = "BEARISH_RETEST"
+    if "volume_spike" in out.columns:
+        out.loc[
+            (out["structure_phase"] == "BULLISH")
+            & (out["trend"] == "bullish")
+            & (out["volume_spike"] == True),
+            "pattern",
+        ] = "BULLISH_BREAKOUT"
+        out.loc[
+            (out["structure_phase"] == "BEARISH")
+            & (out["trend"] == "bearish")
+            & (out["volume_spike"] == True),
+            "pattern",
+        ] = "BEARISH_BREAKOUT"
+
+    if "ema_slope" in out.columns:
+        out.loc[out["ema_slope"] > 0, "score"] += 8
+        out.loc[out["ema_slope"] < 0, "score"] += 8
+
+    if "rsi" in out.columns:
+        out.loc[out["rsi"] < 30, "score"] += 5
+        out.loc[out["rsi"] > 70, "score"] += 5
+
+    if "atr_expansion" in out.columns:
+        out.loc[out["atr_expansion"] == True, "score"] += 6
+
+    if "momentum_strength" in out.columns:
+        out.loc[out["momentum_strength"] == True, "score"] += 6
+
+    strong_pattern = out["pattern"].isin([
+        "BULLISH_RETEST",
+        "BEARISH_RETEST",
+        "BULLISH_BREAKOUT",
+        "BEARISH_BREAKOUT",
+    ])
+    out.loc[strong_pattern, "score"] += 12
+
+    out["signal"] = "NO_TRADE"
+    out.loc[out["score"] >= 85, "signal"] = "A_SETUP"
+    out.loc[(out["score"] >= 68) & (out["score"] < 85), "signal"] = "B_SETUP"
+    out.loc[(out["score"] >= 52) & (out["score"] < 68), "signal"] = "C_SETUP"
+
+    buy_bias = (out["near_support"] == 1) & (out["trend"] == "bullish")
+    sell_bias = (out["near_resistance"] == 1) & (out["trend"] == "bearish")
+
+    if "h1_bias" in out.columns:
+        buy_bias &= out["h1_bias"] == "bullish"
+        sell_bias &= out["h1_bias"] == "bearish"
+
+    out["bias"] = "NONE"
+    out.loc[buy_bias, "bias"] = "BUY"
+    out.loc[sell_bias, "bias"] = "SELL"
+
+    out["alpha_candidate"] = (
+        out["structure_phase"].isin(["BULLISH", "BEARISH"]) &
+        out["signal"].isin(["A_SETUP", "B_SETUP"]) &
+        (out["h1_alignment"] == 1)
+    ).astype(int)
+    out["flow_candidate"] = (out["signal"] != "NO_TRADE").astype(int)
+
     return out
 
 
@@ -440,8 +567,8 @@ def build_trade_setups(df: pd.DataFrame, config) -> pd.DataFrame:
         out.loc[state_mask, "trade_allowed"] = False
         out.loc[state_mask, "risk_dampening_reason"] = "disabled_market_state"
 
-    buy_mask = (out["confirmed_signal"] == "buy") & out["trade_allowed"]
-    sell_mask = (out["confirmed_signal"] == "sell") & out["trade_allowed"]
+    buy_mask = (out["confirmed_signal"] == "buy")
+    sell_mask = (out["confirmed_signal"] == "sell")
     out.loc[buy_mask, "entry_price"] = out["close"]
     out.loc[buy_mask, "stop_loss"] = out["low"] - out["stop_buffer"]
     buy_risk = out["close"] - (out["low"] - out["stop_buffer"])

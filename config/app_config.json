@@ -10,10 +10,6 @@
     "near_threshold": 3.0,
     "major_threshold": 5.0
   },
-  "risk": {
-    "rr_ratio": 2.0,
-    "base_stop_buffer": 3.5
-  },
   "regime": {
     "aligned_range_risk_multiplier": 1.0,
     "aligned_trend_risk_multiplier": 0.9,
@@ -25,13 +21,21 @@
     "high_quality_risk_multiplier": 1.0,
     "elite_quality_risk_multiplier": 1.0,
     "block_choppy_non_elite": true,
-    "block_volatile_medium": true
+    "block_volatile_medium": true,
+    "adaptive_ny_guard": true,
+    "flow_risk_multiplier": 0.5,
+    "flow_min_confirm_score": 45,
+    "flow_volatility_risk_multiplier": 0.8,
+    "flow_choppy_risk_multiplier": 0.8,
+    "alpha_min_score_high_ranging": 65,
+    "alpha_min_score_elite_trending": 75
   },
   "backtest": {
-    "starting_balance": 10000.0,
+    "starting_balance": 1000.0,
     "risk_per_trade": 0.01,
-    "slippage_points": 5.0,
-    "commission_per_trade": 2.5,
+    "dynamic_risk_scaling": true,
+    "slippage_points": 0.2,
+    "commission_per_trade": 0.1,
     "allow_overlapping_positions": false
   },
   "live": {

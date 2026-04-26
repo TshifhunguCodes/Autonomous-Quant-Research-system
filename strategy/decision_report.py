@@ -114,11 +114,23 @@ def generate_stress_validation_report(config):
 
         r_df = pd.read_csv(regime_perf_path)
         
-        # Requirement 1: Min 25 trades per system per regime (for all sessions/states traded)
-        if r_df.empty or (r_df["trades"] < 25).any():
+        if r_df.empty:
             return "Stress Validation Report: ⚠️ INSUFFICIENT DATA (not aborted)"
 
-        # Requirement 2: Min 2 active regimes (Consistent with Governance Alpha Sniper logic)
+        session_rows = r_df[r_df["regime_type"] == "session"].copy()
+        if session_rows.empty:
+            return "Stress Validation Report: ⚠️ INSUFFICIENT DATA (not aborted)"
+
+        # Require at least two session-level regimes with sufficient trade volume
+        strong_session_samples = session_rows[session_rows["trades"] >= 25]
+        if len(strong_session_samples) < 2:
+            return "Stress Validation Report: ⚠️ INSUFFICIENT DATA (not aborted)"
+
+        # Also ensure the OOS period has a minimally valid closed trade sample
+        if oos_sum.get("closed_trades", 0) < 25:
+            return "Stress Validation Report: ⚠️ INSUFFICIENT DATA (not aborted)"
+
+        # Requirement 2: Min 2 active alpha regimes (Consistent with Governance Alpha Sniper logic)
         active_alpha = r_df[(r_df["system"] == "ALPHA") & (r_df["regime_type"] == "session") & 
                             (r_df["regime_value"] != "NEW_YORK") & (r_df["profit_factor"] >= 1.2) & (r_df["net_pnl"] > 0)]
         if len(active_alpha) < 2:

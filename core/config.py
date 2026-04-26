@@ -159,6 +159,11 @@ class RegimeConfig:
     block_volatile_medium: bool = True
     adaptive_ny_guard: bool = True
     flow_risk_multiplier: float = 0.5  # System B risk dampening
+    alpha_min_score_high_ranging: int = 65
+    alpha_min_score_elite_trending: int = 75
+    flow_min_confirm_score: int = 45
+    flow_volatility_risk_multiplier: float = 0.8
+    flow_choppy_risk_multiplier: float = 0.8
     alpha_session_hours: list[int] = field(default_factory=lambda: list(range(2, 16))) # System A hours
     dynamic_priority: bool = True
     priority_lookback: int = 15 # Number of recent trades to evaluate
@@ -176,6 +181,7 @@ class RegimeConfig:
 class BacktestConfig:
     starting_balance: float = 10_000.0
     risk_per_trade: float = 0.01
+    dynamic_risk_scaling: bool = True
     slippage_points: float = 5.0
     commission_per_trade: float = 2.5
     allow_overlapping_positions: bool = False

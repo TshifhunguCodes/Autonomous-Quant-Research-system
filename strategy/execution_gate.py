@@ -12,6 +12,14 @@ class ExecutionGate:
         state = signal["market_state"]
         score = signal["confirm_score"]
         
+        # New: Cost Efficiency Gate
+        # If current spread is > 40% of our Stop Distance, the trade is mathematically 
+        # sub-optimal before it even starts.
+        stop_dist = float(signal.get("stop_distance", 1.0))
+        current_spread = float(signal.get("spread", 0))
+        if stop_dist > 0 and (current_spread / stop_dist) > 0.4:
+            return False, "NONE", 0, "COST_TO_REWARD_REJECTION", True
+        
         # 1. System Selection logic
         alpha_eligible = (
             quality == "ELITE" and 

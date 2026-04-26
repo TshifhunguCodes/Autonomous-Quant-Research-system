@@ -12,6 +12,8 @@ def _settle_trade(active_trade, current_time, outcome, exit_price, config, equit
     if outcome == "WIN":
         r_multiple = active_trade["reward_distance"] / active_trade["risk_distance"]
         pnl = (active_trade["risk_amount"] * r_multiple) - config.backtest.commission_per_trade
+    elif outcome == "BE":
+        pnl = -config.backtest.commission_per_trade
     else:
         pnl = (-active_trade["risk_amount"]) - config.backtest.commission_per_trade
 
@@ -29,10 +31,20 @@ def _settle_trade(active_trade, current_time, outcome, exit_price, config, equit
 
 def _filter_replay_frame(df, start=None, end=None, max_candles=None):
     out = df.copy()
+    min_time = df["time"].min()
+    max_time = df["time"].max()
     if start is not None:
-        out = out[out["time"] >= pd.to_datetime(start)]
+        start_ts = pd.to_datetime(start)
+        if isinstance(start, str) and len(start.strip()) == 10:
+            start_ts = start_ts.normalize()
+        start_ts = max(start_ts, min_time)
+        out = out[out["time"] >= start_ts]
     if end is not None:
-        out = out[out["time"] <= pd.to_datetime(end)]
+        end_ts = pd.to_datetime(end)
+        if isinstance(end, str) and len(end.strip()) == 10:
+            end_ts = end_ts.normalize() + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+        end_ts = min(end_ts, max_time)
+        out = out[out["time"] <= end_ts]
     out = out.sort_values("time").reset_index(drop=True)
     if max_candles is not None:
         out = out.tail(max_candles).reset_index(drop=True)
@@ -74,7 +86,7 @@ def run_replay_frame(
         opened_this_candle = 0
 
         for active_trade in active_trades:
-            outcome, exit_price = _resolve_trade(active_trade, candle)
+            outcome, exit_price, _ = _resolve_trade(active_trade, candle)
             if outcome:
                 trade_record, equity = _settle_trade(
                     active_trade=active_trade,

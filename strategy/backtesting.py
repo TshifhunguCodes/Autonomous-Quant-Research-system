@@ -21,13 +21,19 @@ def _build_alpha_trade(row, config, equity):
     state = row.get("market_state", "UNKNOWN")
     score = float(row.get("confirm_score", 0))
     
-    # Filter 1: Elite Only + London/Asia Session Focus (NY Completely Disabled)
-    if quality != "ELITE" or hour not in config.regime.alpha_session_hours or 13 <= hour < 18:
+    # Filter 1: Elite + structured high-conviction Alpha
+    if quality != "ELITE":
+        if not (
+            quality == "HIGH"
+            and state == "RANGING"
+            and score >= config.regime.alpha_min_score_high_ranging
+        ):
+            return None
+    if hour not in config.regime.alpha_session_hours or 13 <= hour < 18:
         return None
-        
+
     # Filter 2: Regime-based Conviction (Stability Enhancement)
-    # Trends often have deep pullbacks; Alpha requires higher conviction in trending states
-    if state == "TRENDING" and score < 85:
+    if state == "TRENDING" and score < config.regime.alpha_min_score_elite_trending:
         return None
 
     if state in ["CHOPPY", "VOLATILE"]:
@@ -50,14 +56,8 @@ def _build_flow_trade(row, config, equity):
     # Base Risk scaling: base lot × flow risk multiplier × 0.5 dampener
     risk_adj = config.regime.flow_risk_multiplier * 0.5
 
-    # Strict NY Conditions for System B
-    if is_ny:
-        # NY Micro-Strategy: Only allow first breakouts during the 13:00 Power Hour
-        if hour != 13 or not bool(row.get("is_first_breakout", False)) or quality != "ELITE" or score < 90:
-            return None
-        risk_adj *= 0.5  # Additional 50% dampener for NY volatility
-
-    # Broader quality acceptance, reduced risk
+    # Flow is designed to trade in any market regime with minimal restrictions.
+    # All confirmed signals are eligible; risk is adjusted but not blocked by state.
     trade = _build_trade_base(row, config, equity, risk_adj=risk_adj, is_exploratory=True)
     if trade:
         trade["system"] = "FLOW_EXPLORATORY"
@@ -74,7 +74,8 @@ def _build_trade(row, config, equity):
 
 def _build_trade_base(row, config, equity, risk_adj=1.0, is_exploratory=False):
     """Common trade construction logic with adaptive filters"""
-    if not bool(row.get("trade_allowed", True)):
+    rr_ratio = config.risk.rr_ratio
+    if not is_exploratory and not bool(row.get("trade_allowed", True)):
         return None
 
     hour = pd.to_datetime(row["time"]).hour
@@ -83,24 +84,36 @@ def _build_trade_base(row, config, equity, risk_adj=1.0, is_exploratory=False):
 
     if float(row.get("confirm_score", 0)) > 100: return None
 
-    if state == "CHOPPY":  # Low Volatility: skip low-quality, require ELITE
+    if state == "CHOPPY":  # Low Volatility: Alpha stays strict, Flow is more permissive
         if not is_exploratory and quality != "ELITE":
             return None
-        score_floor = 80
-    elif state == "VOLATILE":  # High Volatility: ELITE only, Major Zones, 0.5x risk
+        score_floor = 80 if not is_exploratory else config.regime.flow_min_confirm_score
+        if is_exploratory:
+            risk_adj *= config.regime.flow_choppy_risk_multiplier
+    elif state == "VOLATILE":  # High Volatility: Alpha stays elite-only, Flow can still participate
         if not is_exploratory and (quality != "ELITE" or not (bool(row.get("major_support", 0)) or bool(row.get("major_resistance", 0)))):
             return None
-        score_floor = 90
-        risk_adj *= 0.5
+        score_floor = 90 if not is_exploratory else config.regime.flow_min_confirm_score
+        if is_exploratory:
+            risk_adj *= config.regime.flow_volatility_risk_multiplier
+        else:
+            risk_adj *= 0.5
     else:  # Medium Volatility (RANGING, TRENDING)
         if state == "RANGING":
-            if quality not in ["ELITE", "HIGH"]:
+            if not is_exploratory and quality not in ["ELITE", "HIGH"]:
                 return None
-            score_floor = 65
+            score_floor = 65 if not is_exploratory else config.regime.flow_min_confirm_score
         else:  # Default Trending
-            if quality != "ELITE":
+            if not is_exploratory and quality != "ELITE":
                 return None
-            score_floor = 80
+            score_floor = (
+                config.regime.alpha_min_score_elite_trending
+                if not is_exploratory
+                else config.regime.flow_min_confirm_score
+            )
+
+    if float(row.get("confirm_score", 0)) < score_floor:
+        return None
 
     # 3. Session-Aware Adaptive Restrictions (Bypass for Exploratory System B)
     if not is_exploratory and config.regime.adaptive_ny_guard:
@@ -125,8 +138,7 @@ def _build_trade_base(row, config, equity, risk_adj=1.0, is_exploratory=False):
     risk_adj *= priority_mult
 
     # 5. Timeframe & Conviction Filters
-    if int(row.get("h1_alignment", 0)) != 1 or float(row.get("confirm_score", 0)) < score_floor:
-        return None
+    # (score_floor checked in caller)
 
     signal = row["confirmed_signal"]
     spread_price = float(row.get("spread", 0) or 0) * config.market.point_size
@@ -138,22 +150,42 @@ def _build_trade_base(row, config, equity, risk_adj=1.0, is_exploratory=False):
         return None
 
     if signal == "buy":
+        if is_exploratory:
+            stop_loss = min(stop_loss, entry_price - 0.01)
         executed_entry = entry_price + spread_price + slippage_price
         risk_distance = executed_entry - stop_loss
+        if is_exploratory:
+            take_profit = executed_entry + (risk_distance * rr_ratio)
         reward_distance = take_profit - executed_entry
     else:
+        if is_exploratory:
+            stop_loss = max(stop_loss, entry_price + 0.01)
         executed_entry = entry_price - spread_price - slippage_price
         risk_distance = stop_loss - executed_entry
+        if is_exploratory:
+            take_profit = executed_entry - (risk_distance * rr_ratio)
         reward_distance = executed_entry - take_profit
 
     if risk_distance <= 0 or reward_distance <= 0:
         return None
 
+    if hasattr(config.backtest, 'dynamic_risk_scaling') and config.backtest.dynamic_risk_scaling:
+        if equity <= 100:
+            risk_pct = 0.005
+        elif equity <= 1000:
+            risk_pct = 0.0075
+        elif equity <= 10000:
+            risk_pct = 0.01
+        else:
+            risk_pct = config.backtest.risk_per_trade
+    else:
+        risk_pct = config.backtest.risk_per_trade
+
     if hasattr(config.risk, 'use_atr_sizing') and config.risk.use_atr_sizing:
         atr_value = float(row.get("atr", 1.0))
         risk_amount = equity * config.risk.atr_risk_per_unit * atr_value * float(row.get("risk_multiplier", 1.0) or 1.0) * risk_adj
     else:
-        risk_amount = equity * config.backtest.risk_per_trade * float(row.get("risk_multiplier", 1.0) or 1.0) * risk_adj
+        risk_amount = equity * risk_pct * float(row.get("risk_multiplier", 1.0) or 1.0) * risk_adj
 
     return {
         "signal_time": row["time"],
