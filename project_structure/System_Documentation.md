@@ -1,25 +1,27 @@
-# AQRS V2: Full System Documentation
+# AQRS V3: Full System Documentation
 
 ## 0. Quick Start Checklist
 If you are a human operator or an AI assistant setting this up for the first time:
 1.  **Environment:** Ensure Python 3.9+ is installed. Run `pip install pandas MetaTrader5 streamlit fastapi uvicorn`.
 2.  **Terminal Sync:** Open MetaTrader 5 and ensure you are logged into your XAUUSD broker.
 3.  **Validation:** Run `python strategy/verify_env.py` to confirm terminal and directory readiness.
-4.  **Data Generation:** Run `python main.py --mode research --refresh-data`. This builds the system's internal "maps."
-5.  **Logic Test:** Run `python strategy/smoke_test.py` to ensure the strategy engine is healthy.
-6.  **Dashboard (Control Center):** Run `python strategy/start_dashboard.py` to launch the multi-mode dashboard in your browser.
-5.  **Live Guard:** Always run `python main.py --mode live` (Preview mode) before using the `--execute-live` flag.
+4.  **Data Generation:** Run `python main_v3.py --mode research --output data/research/pipeline.csv`. This builds the system's internal "maps."
+5.  **Logic Test:** Run `python test_v3_integration.py` to ensure the strategy engine is healthy.
+6.  **Dashboard (Control Center):** Run `python main_v3.py --mode dashboard` to launch the multi-mode dashboard in your browser.
+7.  **Live Guard:** Always run `python main_v3.py --mode live` (Preview mode) before using `--execute` flag.
 
 ---
 
 ## 1. Vision & Strategic Philosophy
-The **Autonomous Quant Research System V2 (AQRS V2)** is built on the concept of **Strategic Decoupling**. Most trading bots fail because they try to "win" in every market environment. AQRS V2 accepts that no single logic works everywhere.
+The **Autonomous Quant Research System V3 (AQRS V3)** is built on the concept of **Strategic Decoupling**. Most trading bots fail because they try to "win" in every market environment. AQRS V3 accepts that no single logic works everywhere.
 
 The system operates on two distinct, isolated levels:
 1.  **QEAlpha (The Sniper):** Focused strictly on capital preservation. It only enters "Elite" setups during high-liquidity sessions (London/Asia) and stays out of choppy or over-volatile markets.
 2.  **QEFlowExp (The Sensor):** Focused on data collection. It trades across all market states (including New York and Choppy) with heavily dampened risk. Its primary goal is to provide a continuous feedback loop of live performance data for future optimization.
 
 This dual-path approach ensures that the system "pays the bills" with Alpha while "funding the future" with Flow data.
+
+**V3 Enhancements:** AQRS V3 introduces a modular engine-based architecture with specialized intelligence engines for market behavior classification, price action structure detection, and zone mapping. The system now processes 83 columns of market intelligence, including advanced scoring for ALPHA (score ≥75) and FLOW (score ≥55) signals.
 
 ---
 
@@ -62,14 +64,23 @@ To understand how data becomes a trade, follow this sequence every 5 minutes:
 
 ### 2.1 Directory Structure
 *   **`/agents`**: The data pipeline. Responsible for fetching raw MT5 bars, cleaning timestamps, and calculating technical features (ATR, Moving Averages, Momentum).
-*   **`/core`**: The backbone. Contains centralized configuration (`config.py`), logging utilities, and the primary pipeline orchestrator.
+*   **`/core`**: The backbone. Contains centralized configuration (`config.py`), logging utilities, and the primary pipeline orchestrator (`v3_engine.py`).
 *   **`/strategy`**: The Brain. Contains the logic for market state classification, signal generation, backtesting, and live execution.
 *   **`/data`**: The local database. Separated into `raw`, `research`, `backtest`, `replay`, and `live` to prevent data contamination.
+*   **`/engines`**: V3-specific modular engines for specialized intelligence.
 
-### 2.2 Key Components
-*   **`pipeline_transforms.py`**: The logic hub that converts raw price data into actionable trade setups.
-*   **`backtesting.py`**: A high-fidelity simulator that accounts for spread, commission, slippage, and complex re-entry logic.
-*   **`execution_agent.py`**: The gatekeeper for live trading. It enforces strict safety checks before interacting with MetaTrader 5.
+### 2.2 Key Components (V3)
+*   **`v3_engine.py`**: The main orchestrator for AQRS V3, integrating all engines.
+*   **MarketBehaviorEngine**: Classifies market conditions (TREND_UP/DOWN, RANGE, BREAKOUT, REVERSAL, CHOPPY, VOLATILE) with confidence scoring.
+*   **PriceActionStructureEngine**: Detects price structure (swing points, BOS, CHOCH, patterns, breakouts).
+*   **ZoneEngine**: Identifies trading zones (support/resistance, order blocks, FVGs, session levels) with strength metrics.
+*   **AlphaSystem**: Strict, high-quality signal generation (score ≥75).
+*   **FlowSystem**: Exploratory, broader signal generation (score ≥55).
+*   **RiskManager**: Dynamic position sizing for accounts $100-$50k, stop/TP calculation.
+*   **ReplayEngine**: Candle-by-candle simulation with equity tracking.
+*   **BacktestEngine**: Performance metrics (win rate, profit factor, Sharpe, drawdown).
+*   **ReportingEngine**: Trade analysis and artifact generation.
+*   **MT5ExecutionEngine**: Demo and live order execution.
 
 ---
 
@@ -101,36 +112,43 @@ The system identifies four primary market states based on volatility and price a
 
 ## 4. Operational Workflows
 
-The system is managed via `main.py` using specific modes.
+The system is managed via `main_v3.py` using specific modes.
 
 ### Phase 1: Preparation
 ```bash
 # Fetch fresh data and rebuild indicators
-python main.py --mode research --refresh-data
+python main_v3.py --mode research --output data/research/pipeline.csv
 ```
+Generates 83 columns of market intelligence and saves to CSV.
 
 ### Phase 2: Validation
 ```bash
 # Run a comprehensive backtest
-python main.py --mode backtest --refresh-data
+python main_v3.py --mode backtest --output data/backtest/results.csv
 
 # Quick check after logic changes (uses cached signals)
-python main.py --mode summary --reuse-artifacts
+python main_v3.py --mode replay --replay-max-candles 1000
 ```
 
 ### Phase 3: Robustness Testing
 ```bash
 # Stress test the strategy against random market slices
-python main.py --mode stress --stress-random-runs 10
+python main_v3.py --mode replay --replay-start <timestamp> --replay-end <timestamp>
 ```
 
 ### Phase 4: Production
 ```bash
 # Preview the current signal (Safe)
-python main.py --mode live --reuse-artifacts
+python main_v3.py --mode live
 
 # Active trading (Orders will be sent to MT5)
-python main.py --mode live --execute-live
+python main_v3.py --mode live --execute
+```
+
+### Phase 5: Dashboard
+```bash
+# Launch the multi-mode dashboard
+python main_v3.py --mode dashboard
 ```
 
 ---
@@ -163,22 +181,31 @@ The system employs adaptive Break-Even triggers:
 
 ## 6. Reporting & Metrics
 
-The system generates several critical artifacts in `data/backtest/`:
+The system generates several critical artifacts in `data/backtest/` and `data/research/`:
 
-1.  **`consolidated_stability_report.csv`**: Measures Win Rate standard deviation and Profit Factor consistency across rolling 7-day windows.
-2.  **`system_comparison.csv`**: Provides a side-by-side performance audit of System A vs. System B.
-3.  **`system_regime_performance.csv`**: A granular breakdown of how each strategy performs in specific sessions (London vs. NY) and market states (Chop vs. Trend).
-4.  **In-Sample (IS) vs. Out-of-Sample (OOS)**: Automatically calculates "Win Rate Degradation." If performance drops by more than 20% in OOS data, a "High Overfitting" warning is issued.
+1.  **`pipeline.csv`**: 83 columns of market intelligence including OHLC, technical features, behavior classification, structure detection, zone mapping, scoring, and risk management.
+2.  **`results.csv`**: Backtest results with trade summaries, performance metrics (win rate, profit factor, Sharpe, drawdown).
+3.  **`consolidated_stability_report.csv`**: Measures Win Rate standard deviation and Profit Factor consistency across rolling 7-day windows.
+4.  **`system_comparison.csv`**: Provides a side-by-side performance audit of System A vs. System B.
+5.  **`system_regime_performance.csv`**: A granular breakdown of how each strategy performs in specific sessions (London vs. NY) and market states (Chop vs. Trend).
+6.  **In-Sample (IS) vs. Out-of-Sample (OOS)**: Automatically calculates "Win Rate Degradation." If performance drops by more than 20% in OOS data, a "High Overfitting" warning is issued.
+
+**V3 Specific Outputs:**
+- Market behavior distribution (TREND_UP/DOWN, RANGE, BREAKOUT, etc.)
+- Structure state distribution (swing points, BOS, CHOCH, patterns)
+- Zone strength metrics (support/resistance levels)
+- Dual scoring: Alpha Score (≥75) and Flow Score (≥55)
 
 ---
 
 ## 7. Configuration Management
 
-All parameters are controlled via `config/app_config.json`.
+All parameters are controlled via `config/app_config.json` and `config/v3_config.py`.
 *   **`market`**: Symbol settings, point size, and bar history.
 *   **`regime`**: Risk multipliers, session hours, and setup weightings.
 *   **`backtest`**: Starting balance, commission, and slippage.
 *   **`live`**: Execution thresholds, lot sizes, and allowed qualities.
+*   **`v3_config`**: Engine-specific settings for behavior classification, structure detection, zone mapping, and scoring thresholds (Alpha ≥75, Flow ≥55).
 
 ---
 
@@ -199,11 +226,33 @@ The Replay Engine (`--mode replay`) is used for forensic debugging. It simulates
 
 ---
 
-## 10. Developer Best Practices
-1.  **Data Integrity:** Always use `--refresh-data` when changing feature logic in `feature_agent.py`.
-2.  **Iterative Tweak:** Use `--mode summary --reuse-artifacts` to test small parameter changes in seconds.
-3.  **Stability First:** Prioritize a low **WR_StdDev** (Win Rate Standard Deviation) over a high total Net PnL. Stability allows for higher compounding in the long run.
+## 11. V3 Phase 1 Summary
+
+AQRS V3 introduces a professional, modular autonomous trading system with dual intelligence engines (ALPHA and FLOW). Key enhancements include:
+
+### Core Engines
+- **MarketBehaviorEngine**: Classifies market conditions with confidence scoring.
+- **PriceActionStructureEngine**: Detects swing points, BOS, CHOCH, and patterns.
+- **ZoneEngine**: Identifies support/resistance, order blocks, FVGs, and session levels.
+
+### Dual Systems
+- **AlphaSystem**: Strict signals (score ≥75) for capital preservation.
+- **FlowSystem**: Exploratory signals (score ≥55) for data collection.
+
+### Key Features
+✓ 83-column market intelligence pipeline  
+✓ Dynamic position sizing for $100-$50k accounts  
+✓ Candle-by-candle replay with equity tracking  
+✓ Advanced risk management with adaptive stop/TP  
+✓ Session filtering and time-based analysis  
+✓ CSV artifact export for all analysis layers  
+
+### Quick Commands
+- Research: `python main_v3.py --mode research --output data/research/pipeline.csv`
+- Backtest: `python main_v3.py --mode backtest --output data/backtest/results.csv`
+- Replay: `python main_v3.py --mode replay --replay-max-candles 1000`
+- Integration Test: `python test_v3_integration.py`
 
 ---
-*Documentation generated for AQRS V2 Maintenance & AI Instruction.*
+*Documentation generated for AQRS V3 Maintenance & AI Instruction.*
 ================================================================================
