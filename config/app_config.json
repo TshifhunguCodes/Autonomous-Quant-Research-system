@@ -2,7 +2,7 @@
   "market": {
     "symbol": "XAUUSD",
     "point_size": 0.01,
-    "m5_bars": 100000,
+    "m5_bars": 300000,
     "h1_bars": 2000,
     "history_years": 2.0
   },
@@ -48,6 +48,13 @@
     "disallowed_market_states": ["CHOPPY"],
     "max_signal_age_minutes": 20,
     "max_spread_points": 25.0
+  
+  },
+  "smc": {
+    "min_smc_score": 55,
+    "require_kill_zone": false,
+    "require_ob_or_fvg": true,
+    "require_volume_spike_at_poc": true
   },
   "session_filters": {
     "disable_late_session": false,

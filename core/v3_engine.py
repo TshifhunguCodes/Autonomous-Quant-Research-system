@@ -4,13 +4,10 @@ from typing import Any
 import pandas as pd
 
 from config.v3_config import V3Config
-from engines.behavior_engine import MarketBehaviorEngine
-from engines.structure_engine import PriceActionStructureEngine
-from engines.zone_engine import ZoneEngine
+from engines import MarketBehaviorEngine, PriceActionStructureEngine, ZoneEngine
 from replay.replay_engine import ReplayEngine
 from risk.risk_manager import RiskManager
-from systems.alpha_system import AlphaSystem
-from systems.flow_system import FlowSystem
+from systems import AlphaSystem, FlowSystem
 
 
 class AQRSV3Engine:

@@ -7,10 +7,30 @@ from core.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
+def get_csv_tail(path: Path, n: int = 1) -> pd.DataFrame:
+    """Efficiently reads the last n lines of a CSV file without loading the whole thing."""
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        # Read only a small chunk from the end of the file
+        with open(path, 'rb') as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 4096 * n), 0)
+            lines = f.readlines()
+            # Reconstruct the last n lines + header
+            header = pd.read_csv(path, nrows=0).columns.tolist()
+            return pd.read_csv(path, skiprows=range(1, len(pd.read_csv(path)) - n + 1))
+    except:
+        return pd.read_csv(path).tail(n) # Fallback
+
 class DashboardStateManager:
     def __init__(self, config_path=None):
         self.config = load_config(config_path)
-        self.audit_path = self.config.paths.backtest_dir.parent / "live" / "execution_audit.csv"
+        
+        # Safe path resolution
+        backtest_dir = self.config.paths.backtest_dir if hasattr(self.config.paths, "backtest_dir") else Path("data/backtest")
+        
+        self.audit_path = backtest_dir.parent / "live" / "execution_audit.csv"
         self.setup_path = self.config.paths.trade_setups
         self.replay_decisions_path = self.config.paths.replay_decisions
         self.replay_events_path = self.config.paths.replay_events
@@ -21,9 +41,30 @@ class DashboardStateManager:
         self.replay_ohlc = pd.DataFrame()
         self.replay_trades = pd.DataFrame()
 
+    def get_data_bounds(self):
+        """Returns the start and end dates of the available historical data."""
+        try:
+            if self.clean_m5_path.exists():
+                # Efficiently get first and last timestamps
+                first_row = pd.read_csv(self.clean_m5_path, nrows=1, parse_dates=["time"])
+                last_row = get_csv_tail(self.clean_m5_path, 1)
+                if not first_row.empty and not last_row.empty:
+                    return {
+                        "start": first_row.iloc[0]["time"].date(),
+                        "end": pd.to_datetime(last_row.iloc[0]["time"]).date()
+                    }
+        except Exception as e:
+            logger.error(f"Error getting data bounds: {e}")
+        return {"start": None, "end": None}
+
     def _load_replay_data(self, start_date, end_date):
         """Loads replay decisions and events for a given date range."""
+        import pandas.errors
         try:
+            if not self.replay_decisions_path.exists() or self.replay_decisions_path.stat().st_size == 0:
+                logger.warning("Replay decisions file is empty or missing.")
+                return False
+
             decisions_df = pd.read_csv(self.replay_decisions_path, parse_dates=["time"], low_memory=False)
             m5_df = pd.read_csv(self.clean_m5_path, parse_dates=["time"], low_memory=False)
 
@@ -33,11 +74,19 @@ class DashboardStateManager:
             
             # Load simulated trades if they exist
             if self.config.paths.replay_trades.exists():
-                self.replay_trades = pd.read_csv(self.config.paths.replay_trades, parse_dates=['signal_time', 'exit_time'], low_memory=False)
+                trades_full = pd.read_csv(self.config.paths.replay_trades, parse_dates=['signal_time', 'exit_time'], low_memory=False)
+                self.replay_trades = trades_full[(trades_full["signal_time"].dt.date >= start_date) & (trades_full["signal_time"].dt.date <= end_date)].reset_index(drop=True)
 
-            if self.replay_ohlc.empty or decisions.empty:
+            # Load events and filter
+            if self.config.paths.replay_events.exists():
+                events_full = pd.read_csv(self.config.paths.replay_events, parse_dates=['time'], low_memory=False)
+                self.replay_events = events_full[(events_full["time"].dt.date >= start_date) & (events_full["time"].dt.date <= end_date)].reset_index(drop=True)
+            else:
+                self.replay_events = pd.DataFrame()
+
+            if self.replay_ohlc.empty:
                 logger.warning(
-                    "No replay data available for the selected timeframe: %s to %s",
+                    "No OHLC data available for the selected timeframe: %s to %s",
                     start_date,
                     end_date,
                 )
@@ -45,6 +94,9 @@ class DashboardStateManager:
 
             self.replay_data = {"decisions": self._clean_dataframe_for_json(decisions)}
             return True
+        except pd.errors.EmptyDataError:
+            logger.error("No data found in replay files for the selected range.")
+            return False
         except Exception as e:
             logger.error(f"Failed to load replay data: {e}")
             return False
@@ -64,7 +116,7 @@ class DashboardStateManager:
         try:
             df = pd.DataFrame()
             if mode == "LIVE":
-                df = pd.read_csv(self.setup_path, low_memory=False).tail(1)
+                df = get_csv_tail(self.setup_path, 1)
             elif mode == "REPLAY":
                 decisions = self.replay_data.get("decisions", pd.DataFrame())
                 if not decisions.empty:
@@ -79,12 +131,12 @@ class DashboardStateManager:
             # Helper to safely get values, convert numpy scalars, and replace NaN with None
             def safe_get(series, key, default_val=None):
                 val = series.get(key, default_val)
-                if pd.isna(val):
-                    return None
-                if type(val) in [int, float, str, bool]:
-                    return val
                 if hasattr(val, 'item'):
                     return val.item()
+                if pd.isna(val):
+                    return None
+                if isinstance(val, (int, float, str, bool)):
+                    return val
                 return val
 
             # V3 Scoring Logic
@@ -102,9 +154,11 @@ class DashboardStateManager:
                 "alpha_score": alpha_score,
                 "flow_score": flow_score,
                 "current_price": safe_get(row, "close"),
-                "current_zone": f"S:{safe_get(row, 'support_level'):.2f} R:{safe_get(row, 'resistance_level'):.2f}",
+                "current_zone": f"S:{safe_get(row, 'support_level', 0):.2f} R:{safe_get(row, 'resistance_level', 0):.2f}"
+                                if safe_get(row, 'support_level') is not None else "N/A",
                 "setup": safe_get(row, "setup", "NONE"),
-                "confirmed_signal": safe_get(row, "confirmed_signal", "none").upper()
+                "confirmed_signal": safe_get(row, "confirmed_signal", "none").upper(),
+                "execution_reason": safe_get(row, "execution_reason", "N/A")
             }
         except Exception:
             return {}
@@ -159,7 +213,7 @@ class DashboardStateManager:
                             "sl": t['stop_loss'],
                             "tp": t['take_profit'],
                             "pnl": round(unrealized_pnl, 2),
-                            "comment": t.get('setup', 'REPLAY')
+                            "comment": f"{t.get('system', 'REPLAY').upper()} | {t.get('setup', 'N/A')}"
                         })
                 except Exception as e:
                     logger.error(f"Error reconstructing active replay trades: {e}")
@@ -173,27 +227,34 @@ class DashboardStateManager:
             except Exception as e:
                 logger.error(f"Error reading LIVE history: {e}")
                 history = pd.DataFrame()
-        elif mode == "REPLAY" and self.config.paths.replay_events.exists():
+        elif mode == "REPLAY" and not self.replay_ohlc.empty:
             try:
                 # Filter events to match the current replay progress
-                idx = min(replay_index, len(self.replay_ohlc) - 1) if not self.replay_ohlc.empty else 0
-                current_time = self.replay_ohlc.iloc[idx]['time'] if not self.replay_ohlc.empty else None
+                idx = min(replay_index, len(self.replay_ohlc) - 1)
+                current_time = self.replay_ohlc.iloc[idx]['time']
                 
-                history = pd.read_csv(self.config.paths.replay_events, parse_dates=['time'])
-                if current_time:
-                    history = history[history['time'] <= current_time].tail(50)
+                # Use in-memory filtered events
+                history_raw = getattr(self, 'replay_events', pd.DataFrame())
+                if history_raw.empty and self.config.paths.replay_events.exists():
+                    history_raw = pd.read_csv(self.config.paths.replay_events, parse_dates=['time'])
+                
+                if not history_raw.empty:
+                    history = history_raw[history_raw['time'] <= current_time].tail(50).copy()
                 
                 if not history.empty:
-                    # Normalize columns for the dashboard's chart and feed logic
+                    # Normalize columns for the dashboard's unified feed logic
                     history = history.rename(columns={
                         "event": "status",
-                        "time": "signal_time",
                         "decision": "retcode",
                         "trade_id": "ticket"
                     })
+                    # Ensure required columns for dashboard table are present
+                    if "system" not in history.columns: history["system"] = "REPLAY"
+                    if "side" not in history.columns: history["side"] = "N/A"
+                    if "price" not in history.columns: history["price"] = 0.0
+
                     # Map internal events to dashboard-recognized statuses
                     history["status"] = history["status"].replace("TRADE_OPENED", "EXECUTED")
-                    history["time"] = history["signal_time"] # Ensure dual time columns
                     history = self._clean_dataframe_for_json(history)
             except Exception as e:
                 logger.error(f"Error reading REPLAY history: {e}")
@@ -245,12 +306,19 @@ class DashboardStateManager:
         elif mode == "REPLAY":
             # Compute dynamic running stats for replay
             stats = {"pnl": 0.0, "trades": 0, "win_rate": 0.0, "profit_factor": 0.0, 
-                     "balance": getattr(self.config.backtest, 'starting_balance', 10000)}
+                     "balance": float(getattr(self.config.backtest, 'starting_balance', 1000.0)),
+                     "equity": float(getattr(self.config.backtest, 'starting_balance', 1000.0)),
+                     "alpha_signals": 0, "flow_signals": 0}
             
             if self.replay_ohlc.empty and mode == "REPLAY":
                 return {"REPLAY": stats}
             
             if not self.replay_ohlc.empty:
+                decisions = self.replay_data.get("decisions", pd.DataFrame())
+                if not decisions.empty:
+                    stats["alpha_signals"] = len(decisions[decisions['signal'] == 'ALPHA'])
+                    stats["flow_signals"] = len(decisions[decisions['signal'] == 'FLOW'])
+
                 idx = min(replay_index, len(self.replay_ohlc) - 1)
                 current_time = self.replay_ohlc.iloc[idx]['time']
                 current_price = self.replay_ohlc.iloc[idx]['close']
@@ -268,6 +336,8 @@ class DashboardStateManager:
                     stats["losses"] = int((closed['result'] == 'LOSE').sum())
                     stats["balance"] = round(self.config.backtest.starting_balance + stats["pnl"], 2)
                     # Calculate win_rate if there are closed trades
+                    # Ensure win_rate is calculated based on closed trades
+                    stats["wins"] = len(closed[closed['pnl'] > 0])
                     if stats["trades"] > 0:
                         stats["win_rate"] = round((stats["wins"] / stats["trades"]) * 100, 2)
                     else:

@@ -1,5 +1,6 @@
 from core.logging_utils import get_logger
 import pandas as pd
+from strategy.smc_ict_engine import SMCEngine
 
 logger = get_logger(__name__)
 
@@ -12,6 +13,35 @@ class ExecutionGate:
         state = signal["market_state"]
         score = signal["confirm_score"]
         
+        # ICT Kill Zone Filter: Enforce high-volume windows for non-ELITE trades
+        is_kill_zone = SMCEngine.is_ict_kill_zone(hour)
+        if not is_kill_zone and quality != "ELITE":
+            return False, "NONE", 0, "OUTSIDE_ICT_KILLZONE_REJECTION", True
+
+        # SMC/ICT Multi-Confluence Gate
+      # ELITE (ALPHA) signals MUST have a structural imbalance (FVG).
+        # FLOW signals are exploratory and do not require full institutional displacement.
+        if config.smc.require_ob_or_fvg and quality == "ELITE":
+            has_imbalance = bool(signal.get("fvg_bullish", False)) or bool(signal.get("fvg_bearish", False))
+            if not has_imbalance:
+                return False, "NONE", 0, "ALPHA_SMC_NO_IMBALANCE_REJECTION", True
+
+        # MSS Validation: ALPHA trades MUST have a recent liquidity sweep for high probability
+        if quality == "ELITE":
+            has_sweep = bool(signal.get("sweep_high", False)) or bool(signal.get("sweep_low", False))
+            if not has_sweep and score < 90:
+                return False, "NONE", 0, "ALPHA_SMC_NO_SWEEP_REJECTION", True
+
+        # Premium/Discount Gate: Don't buy in Premium, Don't sell in Discount
+        direction = signal.get("confirmed_signal", "").upper()
+        if (direction == "BUY" and signal.get("is_premium")) or (direction == "SELL" and signal.get("is_discount")):
+            return False, "NONE", 0, "INSTITUTIONAL_PRICING_REJECTION", True
+        
+        # Volume Spike at POC Gate: Requires a volume spike near the previous session's POC
+        if config.smc.require_volume_spike_at_poc:
+            if not (signal.get("volume_spike", False) and signal.get("near_prev_poc", False)):
+                return False, "NONE", 0, "SMC_NO_VOLUME_SPIKE_AT_POC_REJECTION", True
+
         # New: Cost Efficiency Gate
         # If current spread is > 40% of our Stop Distance, the trade is mathematically 
         # sub-optimal before it even starts.

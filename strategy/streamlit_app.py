@@ -1,60 +1,109 @@
 import streamlit as st
-import requests
 import pandas as pd
 import time
-from datetime import datetime, timedelta
+import sys
+import os
+import subprocess
+from datetime import datetime, timedelta, date
 import plotly.graph_objects as go
 import numpy as np
-from functools import lru_cache
+
+# Ensure project root is in path for absolute imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from strategy.state_manager import DashboardStateManager, get_csv_tail
 
 st.set_page_config(page_title="AQRS V3 Dashboard", layout="wide", initial_sidebar_state="expanded")
 
-API_URL = "http://127.0.0.1:8001"
-
-# Data cache for better performance
-@st.cache_data(ttl=2)
-def fetch_data_cached(endpoint, params_str):
-    """Cached data fetching with TTL of 2 seconds"""
-    try:
-        # Parse params_str back to dict for API call
-        import json
-        params = json.loads(params_str) if params_str else None
-        response = requests.get(f"{API_URL}/{endpoint}", params=params, timeout=5)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        st.toast(f"⚠️ {endpoint} unavailable", icon="⚠️")
-        if endpoint in ["signals", "chart_data"]:
-            return []
-        return {}
-
 def fetch_data(endpoint, params=None):
-    """Wrapper for cached data fetching"""
+    """Directly calls StateManager instead of using FastAPI requests."""
+    sm = st.session_state.state_manager
+    mode = params.get("mode", "LIVE")
+    idx = params.get("replay_index", 0)
+
+    if endpoint == "state":
+        market = sm.get_market_state(mode=mode, replay_index=idx)
+        account = sm.get_mt5_account_info() if mode == "LIVE" else {}
+        return {"market": market, "account": account}
+
+    if endpoint == "trades":
+        return sm.get_trades(mode=mode, replay_index=idx)
+
     if endpoint == "performance":
-        # Don't cache performance data as it changes frequently
+        return sm.get_performance_stats(mode=mode, replay_index=idx)
+
+    if endpoint == "chart_data":
+        df = sm.get_chart_data(mode=mode, replay_index=idx, num_candles=params.get("num_candles", 100))
+        return df.to_dict(orient="records") if not df.empty else []
+
+    if endpoint == "signals":
         try:
-            response = requests.get(f"{API_URL}/{endpoint}", params=params, timeout=5)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            st.toast(f"⚠️ {endpoint} unavailable", icon="⚠️")
-            return {}
-    else:
-        import json
-        params_str = json.dumps(params) if params else ""
-        return fetch_data_cached(endpoint, params_str)
+            if mode == "LIVE":
+                df = get_csv_tail(sm.setup_path, 50)
+            elif mode == "REPLAY" and not sm.replay_data.get("decisions", pd.DataFrame()).empty:
+                df = sm.replay_data["decisions"]
+                df = df.iloc[:idx + 1].tail(50) if idx < len(df) else df.tail(50)
+            else: return []
+            return df.to_dict(orient="records")
+        except: return []
+
+    if endpoint == "replay_control":
+        action = params.get("action")
+        if action == "status":
+            return st.session_state.get("replay_internal_state", {"running": False, "data_loaded": False})
+        
+        if action == "start":
+            st.toast("🚀 Generating V3 Replay Artifacts...", icon="⏳")
+            cmd = [sys.executable, "main_v3.py", "--mode", "replay",
+                   "--replay-start", params["start_date"], "--replay-end", params["end_date"], 
+                   "--output", "data/replay/replay_decisions.csv", "--skip-readiness"]
+            
+            try:
+                os.makedirs("data/replay", exist_ok=True)
+                # Start process in background
+                proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                st.session_state.replay_proc = proc
+                return {"status": "started"}
+            except Exception as e:
+                st.error(f"Failed to launch replay: {e}")
+                return {"total_candles": 0, "data_loaded": False}
+            return {"total_candles": 0, "data_loaded": False}
+
+    if endpoint == "backtest_control":
+        if params.get("action") == "run":
+            cmd = [sys.executable, "main_v3.py", "--mode", "backtest", "--output", "data/backtest/v3_research_output.csv"]
+            subprocess.Popen(cmd) 
+            return {"status": "Backtest started"}
+            
+    return {}
 
 # Sidebar Navigation
 st.sidebar.title("🧠 AQRS V3 Dashboard")
-page = st.sidebar.selectbox("Navigate", ["Main Dashboard", "Live Trades", "System Comparison", "Audit Logs"])
-refresh_rate = st.sidebar.slider("Refresh Rate (sec)", 1, 5, 2)
 
 def initialize_session_state():
-    # Check backend for existing replay state to survive refreshes
-    backend_state = fetch_data("replay_control", {"action": "status"})
+    if "state_manager" not in st.session_state:
+        st.session_state.state_manager = DashboardStateManager()
+    
+    # Initialize internal replay state if not exists
+    if "replay_internal_state" not in st.session_state:
+        st.session_state.replay_internal_state = {
+            "running": False,
+            "index": 0,
+            "total_candles": 0,
+            "start_date": None,
+            "end_date": None,
+            "data_loaded": False
+        }
+
+    if "replay_generating" not in st.session_state:
+        st.session_state.replay_generating = False
+    if "replay_proc" not in st.session_state:
+        st.session_state.replay_proc = None
+
+    backend_state = st.session_state.replay_internal_state
     
     if "mode" not in st.session_state:
-        st.session_state.mode = "REPLAY" if backend_state.get("running") else "LIVE"
+        st.session_state.mode = "LIVE"
     if "symbol" not in st.session_state:
         st.session_state.symbol = "XAUUSD" # Default, could be fetched from config
     if "refresh_rate" not in st.session_state:
@@ -68,15 +117,19 @@ def initialize_session_state():
     
     # Restore dates from backend if available, otherwise use defaults
     if "replay_start_date" not in st.session_state:
-        if backend_state.get("start_date"):
-            st.session_state.replay_start_date = datetime.strptime(backend_state["start_date"], "%Y-%m-%d").date()
+        bounds = st.session_state.state_manager.get_data_bounds()
+        if bounds["end"]:
+            # Default to the last 3 days of data for speed
+            st.session_state.replay_start_date = bounds["end"] - timedelta(days=3)
         else:
-            st.session_state.replay_start_date = (datetime.now() - timedelta(days=7)).date()
+            st.session_state.replay_start_date = date(2025, 1, 1)
+            
     if "replay_end_date" not in st.session_state:
-        if backend_state.get("end_date"):
-            st.session_state.replay_end_date = datetime.strptime(backend_state["end_date"], "%Y-%m-%d").date()
+        bounds = st.session_state.state_manager.get_data_bounds()
+        if bounds["end"]:
+            st.session_state.replay_end_date = bounds["end"]
         else:
-            st.session_state.replay_end_date = datetime.now().date()
+            st.session_state.replay_end_date = date(2026, 4, 30)
 
     # Keep the UI aligned with backend replay range when a replay is already loaded
     if backend_state.get("start_date") and backend_state.get("end_date"):
@@ -128,28 +181,32 @@ def render_top_bar():
                 "End Date", st.session_state.replay_end_date, key="replay_end_date_input"
             )
 
+        # Show available data range so user doesn't pick empty dates
+        bounds = st.session_state.state_manager.get_data_bounds()
+        if bounds["start"]:
+            st.sidebar.caption(f"📅 Data available: {bounds['start']} to {bounds['end']}")
+
         st.sidebar.markdown("---")
         col_btn1, col_btn2, col_btn3 = st.sidebar.columns(3)
         with col_btn1:
-            if st.button("▶️ Start Replay", width='stretch', disabled=st.session_state.replay_running):
-                st.session_state.replay_running = True
-                st.session_state.replay_index = 0 # Reset index on start
-                st.session_state.replay_data_loaded = False # Mark data as not loaded yet
-                # Send control to backend to initialize replay
-                response = fetch_data("replay_control", {
+            if st.button("▶️ Start Replay", use_container_width=True, disabled=st.session_state.replay_running):
+                # Initiate async generation
+                fetch_data("replay_control", {
                     "action": "start",
                     "start_date": st.session_state.replay_start_date.isoformat(),
                     "end_date": st.session_state.replay_end_date.isoformat()
                 })
-                if response:
-                    st.session_state.replay_total_candles = response.get("total_candles", 0)
-                    st.session_state.replay_data_loaded = response.get("data_loaded", False)
+                st.session_state.replay_generating = True
+                st.session_state.replay_running = False
+                st.session_state.replay_data_loaded = False
+                st.rerun()
+
         with col_btn2:
-            if st.button("⏸️ Pause", width='stretch', disabled=not st.session_state.replay_running):
+            if st.button("⏸️ Pause", use_container_width=True, disabled=not st.session_state.replay_running):
                 st.session_state.replay_running = False
                 fetch_data("replay_control", {"action": "pause"})
         with col_btn3:
-            if st.button("🔄 Reset", width='stretch', disabled=st.session_state.replay_running and st.session_state.replay_index > 0):
+            if st.button("🔄 Reset", use_container_width=True, disabled=st.session_state.replay_running and st.session_state.replay_index > 0):
                 st.session_state.replay_running = False
                 st.session_state.replay_index = 0
                 st.session_state.replay_total_candles = 0
@@ -170,7 +227,7 @@ def render_top_bar():
             st.session_state.backtest_end_date = st.date_input(
                 "End Date", st.session_state.backtest_end_date, key="backtest_end_date_input"
             )
-        if st.sidebar.button("📊 Run Backtest", width='stretch', disabled=st.session_state.backtest_running):
+        if st.sidebar.button("📊 Run Backtest", use_container_width=True, disabled=st.session_state.backtest_running):
             st.session_state.backtest_running = True
             with st.spinner("Running full backtest... This may take a while."):
                 response = fetch_data("backtest_control", {
@@ -227,6 +284,33 @@ def render_market_panel(market_state_data, mode="LIVE", replay_index=0, total_ca
     signal = m.get('confirmed_signal', 'none').upper()
     sig_color = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "⚪"
     c4.info(f"**Signal**\n{sig_color} `{signal}`")
+    st.info(f"**Current Trade Logic:**\n`{m.get('execution_reason', 'N/A')}`")
+
+def render_signals_feed(signals_data):
+    st.subheader("📡 Signals Intelligence Feed")
+    if signals_data and len(signals_data) > 0:
+        sig_df = pd.DataFrame(signals_data)
+        display_cols = ["time", "confirmed_signal", "quality", "alpha_score", "flow_score", "market_state", "market_regime", "execution_reason"]
+        available_cols = [c for col in display_cols if (c := col) in sig_df.columns]
+        sig_df = sig_df[available_cols].copy()
+        
+        st.dataframe(
+            sig_df.tail(20),
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "time": st.column_config.TextColumn("Time"),
+                "confirmed_signal": st.column_config.TextColumn("Signal"),
+                "quality": st.column_config.TextColumn("Quality"),
+                "alpha_score": st.column_config.NumberColumn("Alpha"),
+                "flow_score": st.column_config.NumberColumn("Flow"),
+                "market_state": st.column_config.TextColumn("Structure"),
+                "market_regime": st.column_config.TextColumn("Regime"),
+                "execution_reason": st.column_config.TextColumn("Logic")
+            }
+        )
+    else:
+        st.info("🔄 No signals detected in this range yet.")
 
 def render_dual_engine_panel(market_state_data, performance_data, trades_data, mode, replay_index=0, total_candles=0):
     st.subheader("⚙️ Dual Engine Decision System")
@@ -320,7 +404,7 @@ def render_trade_feed(trade_history):
     st.subheader("📜 Trade Feed")
     if trade_history and len(trade_history) > 0:
         feed_df = pd.DataFrame(trade_history)
-        # Filter for relevant columns and ensure 'time' is present
+        # Filter for relevant columns and ensure 'time' is present, handling replay-specific columns
         display_cols = ["time", "system", "side", "status", "price", "retcode"]
         available_cols = [col for col in display_cols if col in feed_df.columns]
         feed_df = feed_df[available_cols]
@@ -333,7 +417,7 @@ def render_trade_feed(trade_history):
             column_config={
                 "time": st.column_config.TextColumn("Time"),
                 "system": st.column_config.TextColumn("System"),
-                "side": st.column_config.TextColumn("Side"),
+                "side": st.column_config.TextColumn("Side", help="Trade direction (buy/sell)"),
                 "status": st.column_config.TextColumn("Status"),
                 "price": st.column_config.NumberColumn("Price", format="%.5f"),
                 "retcode": st.column_config.TextColumn("Result")
@@ -415,9 +499,9 @@ def render_chart(chart_data_raw, trades_data):
                     fig.add_hline(y=trade['tp'], line_dash="dot", line_color="cyan", annotation_text="TP", annotation_position="top right")
                 if trade['sl'] and trade['sl'] != 0:
                     fig.add_hline(y=trade['sl'], line_dash="dot", line_color="orange", annotation_text="SL", annotation_position="bottom right")
-
-    fig.update_layout(xaxis_rangeslider_visible=False, height=600, title="XAUUSD Candlestick Chart")
-    st.plotly_chart(fig, use_container_width=True)
+    
+    fig.update_layout(xaxis_rangeslider_visible=False, height=600, title="XAUUSD Candlestick Chart") # Removed use_container_width
+    st.plotly_chart(fig, width='stretch') # Replaced use_container_width=True with width='stretch'
 
 def render_performance_panel(performance_data, account_info, mode):
     """Render performance metrics with mode-specific details"""
@@ -502,6 +586,15 @@ def render_performance_panel(performance_data, account_info, mode):
                     pnl_color = "normal" if pnl >= 0 else "inverse"
                     c3.metric("Realized PnL", f"${pnl:,.2f}", delta=f"{pnl:,.2f}", delta_color=pnl_color)
                 
+                # Range Intelligence Summary (Mirroring console output)
+                with st.container(border=True):
+                    st.markdown("#### 📋 V3 REPLAY RANGE SUMMARY")
+                    rs_col1, rs_col2, rs_col3 = st.columns(3)
+                    rs_col1.write(f"**Total ALPHA Signals:** {replay_perf.get('alpha_signals', 0)}")
+                    rs_col2.write(f"**Total FLOW Signals:** {replay_perf.get('flow_signals', 0)}")
+                    total_ops = replay_perf.get('alpha_signals', 0) + replay_perf.get('flow_signals', 0)
+                    rs_col3.write(f"**Total Opportunities:** {total_ops}")
+
                 with st.container(border=True):
                     st.markdown("### 🔄 Replay Engine Performance Results")
                     rep_col1, rep_col2, rep_col3 = st.columns(3)
@@ -532,6 +625,37 @@ def main():
     initialize_session_state()
     render_top_bar()
 
+    # --- Async Polling Logic ---
+    if st.session_state.replay_generating:
+        proc = st.session_state.replay_proc
+        if proc and proc.poll() is None:
+            st.info("🚀 **AQRS Engine is generating replay artifacts in the background...**")
+            st.caption("You can still explore the sidebar or switch modes. The replay will start automatically once ready.")
+            time.sleep(2) # Prevent rapid-fire reruns
+            st.rerun()
+        else:
+            # Process finished!
+            st.session_state.replay_generating = False
+            sm = st.session_state.state_manager
+            
+            # Load the results
+            if sm._load_replay_data(st.session_state.replay_start_date, st.session_state.replay_end_date):
+                st.session_state.replay_running = True
+                st.session_state.replay_index = 0
+                st.session_state.replay_total_candles = len(sm.replay_ohlc)
+                st.session_state.replay_data_loaded = True
+                st.success("✅ Replay artifacts generated successfully!")
+                time.sleep(1)
+            else:
+                st.error("❌ Generation finished but no data was found for this range.")
+                st.session_state.replay_data_loaded = False
+            
+            st.session_state.replay_proc = None
+            st.rerun()
+
+    # Standalone mode: Backend is always "online"
+    st.session_state.backend_online = True
+
     # Fetch data based on current mode
     params = {"mode": st.session_state.mode}
     if st.session_state.mode == "REPLAY":
@@ -543,8 +667,16 @@ def main():
     trades_data = fetch_data("trades", params)
     performance_data = fetch_data("performance", params)
     chart_data = fetch_data("chart_data", params)
+    signals_data = fetch_data("signals", params)
 
     # Extract account info from state_data
+    if not state_data:
+        st.error("🚨 **API Backend Connection Lost**")
+        st.info("Please ensure `python -m strategy.backend_api` is running in your terminal.")
+        if st.button("🔄 Retry Connection"):
+            st.rerun()
+        return
+
     account_info = state_data.get("account") if state_data else None
 
     # Main title with mode indicator
@@ -558,6 +690,10 @@ def main():
     
     # 2. Dual Engine Decision System
     render_dual_engine_panel(state_data.get("market") if state_data else None, performance_data, trades_data, st.session_state.mode, st.session_state.replay_index if st.session_state.mode == "REPLAY" else 0, st.session_state.replay_total_candles if st.session_state.mode == "REPLAY" else 0)
+    st.divider()
+
+    # 2.5 Signals Intelligence Feed
+    render_signals_feed(signals_data)
     st.divider()
     
     # 3. Candlestick Chart

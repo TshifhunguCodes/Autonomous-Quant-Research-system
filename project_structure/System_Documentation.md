@@ -77,7 +77,7 @@ To understand how data becomes a trade, follow this sequence every 5 minutes:
 *   **AlphaSystem**: Strict, high-quality signal generation (score ≥75).
 *   **FlowSystem**: Exploratory, broader signal generation (score ≥55).
 *   **RiskManager**: Dynamic position sizing for accounts $100-$50k, stop/TP calculation.
-*   **ReplayEngine**: Candle-by-candle simulation with equity tracking.
+*   **ReplayEngine**: Candle-by-candle simulation with equity tracking and asynchronous artifact generation.
 *   **BacktestEngine**: Performance metrics (win rate, profit factor, Sharpe, drawdown).
 *   **ReportingEngine**: Trade analysis and artifact generation.
 *   **MT5ExecutionEngine**: Demo and live order execution.

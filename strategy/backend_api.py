@@ -6,12 +6,43 @@ from core.logging_utils import get_logger
 import uvicorn
 import numpy as np
 import subprocess
-from datetime import date
+from datetime import date, datetime
 
 logger = get_logger(__name__)
 
 app = FastAPI(title="AQRS Real-Time API")
 state_manager = DashboardStateManager()
+
+def _clean_for_json(data):
+    """Recursive helper to make data JSON-serializable (handles NumPy, Timestamps, NaN)."""
+    if data is None:
+        return None
+
+    # Handle collections first to avoid pd.isna() ValueError on lists/dicts
+    if isinstance(data, list):
+        return [_clean_for_json(i) for i in data]
+    if isinstance(data, dict):
+        return {k: _clean_for_json(v) for k, v in data.items()}
+    if isinstance(data, np.ndarray):
+        return [_clean_for_json(i) for i in data.tolist()]
+
+    # Handle pandas/numpy Nulls
+    if isinstance(data, (float, np.floating)) and np.isnan(data):
+        return None
+    if data is pd.NA:
+        return None
+
+    if isinstance(data, (datetime, date, pd.Timestamp)):
+        return data.isoformat()
+    if isinstance(data, (np.generic, np.integer, np.floating)):
+        return data.item()
+    return data
+
+@app.get("/health")
+def health_check():
+    """Simple endpoint to verify API is online."""
+    return {"status": "online", "timestamp": datetime.now().isoformat()}
+
 
 # Global state for replay mode
 replay_state = {
@@ -35,18 +66,19 @@ def get_state(mode: str = "LIVE", replay_index: int = 0):
         logger.warning(f"Empty market state for REPLAY mode at index {replay_index}. Total decisions: {len(state_manager.replay_data.get('decisions', []))}, Total ohlc: {len(state_manager.replay_ohlc)}")
         market_state = {}
     
-    return {
+    return _clean_for_json({
         "market": market_state,
         "account": account_info
-    }
+    })
 
 @app.get("/trades")
 def get_trades(mode: str = "LIVE", replay_index: int = 0):
-    return state_manager.get_trades(mode=mode, replay_index=replay_index)
+    trades_data = state_manager.get_trades(mode=mode, replay_index=replay_index)
+    return _clean_for_json(trades_data)
 
 @app.get("/performance")
 def get_performance(mode: str = "LIVE", replay_index: int = 0):
-    return state_manager.get_performance_stats(mode=mode, replay_index=replay_index)
+    return _clean_for_json(state_manager.get_performance_stats(mode=mode, replay_index=replay_index))
 
 @app.get("/signals")
 def get_signals(mode: str = "LIVE", replay_index: int = 0):
@@ -63,11 +95,7 @@ def get_signals(mode: str = "LIVE", replay_index: int = 0):
         else:
             return []
 
-        # Replace NaN with None and convert numpy types to Python native types
-        df = df.replace({np.nan: None})
-        for col in df.select_dtypes(include=[np.integer, np.floating]).columns:
-            df[col] = df[col].apply(lambda x: x.item() if pd.notna(x) else None)
-        return df.to_dict(orient="records")
+        return _clean_for_json(df.to_dict(orient="records"))
     except Exception as e:
         logger.error(f"Error getting signals: {e}")
         return []
@@ -75,13 +103,16 @@ def get_signals(mode: str = "LIVE", replay_index: int = 0):
 @app.get("/chart_data")
 def get_chart_data(mode: str = "LIVE", replay_index: int = 0, num_candles: int = 100):
     df = state_manager.get_chart_data(mode=mode, replay_index=replay_index, num_candles=num_candles)
-    data_to_return = df.to_dict(orient="records")
+    data_to_return = _clean_for_json(df.to_dict(orient="records"))
     logger.debug(f"Returning chart data (first 5 records): {data_to_return[:5]}")
     return data_to_return
 
 @app.get("/replay_control")
 def replay_control(action: str, start_date: str = None, end_date: str = None, index: int = 0):
     global replay_state
+    if action == "status":
+        return replay_state
+
     if action == "start":
         if not start_date or not end_date:
             return {"error": "Missing replay start/end dates", "total_candles": 0, "data_loaded": False}
@@ -100,7 +131,7 @@ def replay_control(action: str, start_date: str = None, end_date: str = None, in
         
         # V3 Migration: Use main_v3.py for replay generation
         cmd = [sys.executable, "main_v3.py", "--mode", "replay",
-               "--replay-start", start_date, "--replay-end", end_date, "--output", "data/replay/replay_decisions.csv"]
+               "--replay-start", start_date, "--replay-end", end_date, "--output", "data/replay/replay_decisions.csv", "--skip-readiness"]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             logger.error(f"Replay failed: {result.stderr}")

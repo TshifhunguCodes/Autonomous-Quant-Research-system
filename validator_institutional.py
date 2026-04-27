@@ -535,7 +535,7 @@ def main():
     print("=" * 70)
 
     for result in results["results"]:
-        status = "✓ PASS" if result["passed"] else "✗ FAIL"
+        status = "[PASS]" if result["passed"] else "[FAIL]"
         print(f"\n{status} | {result['test_name']}: {result['score']:.1f}/100")
         for key, value in result["details"].items():
             if isinstance(value, list):
@@ -547,7 +547,7 @@ def main():
         if result["warnings"]:
             for warning in result["warnings"]:
                 if warning:
-                    print(f"  ⚠ WARNING: {warning}")
+                    print(f"  [WARN] {warning}")
 
     readiness = results["readiness_score"]
     print("\n" + "=" * 70)
@@ -558,7 +558,7 @@ def main():
     # Save results
     output_path = Path("data/backtest/v3_validation_report.json")
     output_path.write_text(json.dumps(results, indent=2, cls=NumpyEncoder))
-    print(f"\n✓ Full validation report saved to {output_path}")
+    print(f"\n[OK] Full validation report saved to {output_path}")
 
     return results
 

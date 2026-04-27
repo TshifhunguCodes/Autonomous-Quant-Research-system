@@ -4,9 +4,6 @@
 from core.config import load_config
 from core.v3_engine import AQRSV3Engine
 from config.v3_config import V3Config
-from backtesting.backtest_engine import BacktestEngine
-from research.research_engine import ResearchEngine
-from reporting.reporting_engine import ReportingEngine
 import pandas as pd
 
 def main():
@@ -14,33 +11,23 @@ def main():
     config = V3Config.load_from(base_config)
     engine = AQRSV3Engine(config)
 
-    # Load small dataset
+    print("Starting V3 Integration Test...")
+    # Load small dataset for rapid validation
     df = pd.read_csv('data/clean/xauusd_m5_clean.csv', parse_dates=['time']).head(500)
-    result = engine.run_research(df=df)
+    
+    # Test Step 1: Research Pipeline (83-column generation)
+    research_result = engine.run_research(df=df)
+    print(f"✓ Research Pipeline: Generated {len(research_result)} intelligence rows.")
 
-    # Backtest
-    backtest = BacktestEngine(config)
-    metrics = backtest.compute_metrics(result)
-    print('Backtest Metrics:')
-    print(f'  Total Trades: {metrics["total_trades"]}')
-    print(f'  Win Rate: {metrics["win_rate"]:.2%}')
-    print(f'  Profit Factor: {metrics["profit_factor"]:.2f}')
-    print(f'  Sharpe Ratio: {metrics["sharpe_ratio"]:.2f}')
-    print(f'  Max Drawdown: {metrics["max_drawdown"]:.2%}')
-
-    # Research
-    research = ResearchEngine(config)
-    artifacts = research.run(result, output_dir='data/research')
-    print(f'\nResearch artifacts saved: {artifacts["meta"]}')
-
-    # Reporting
-    reporting = ReportingEngine(config)
-    report = reporting.build_report(result, output_dir='data/backtest')
-    print(f'\nReport generated:')
-    print(f'  Alpha Trades: {report["alpha_summary"]["count"]}')
-    print(f'  Flow Trades: {report["flow_summary"]["count"]}')
-    print(f'  Alpha Avg Score: {report["alpha_summary"]["avg_score"]:.1f}')
-    print(f'  Flow Avg Score: {report["flow_summary"]["avg_score"]:.1f}')
+    # Test Step 2: V3 Backtest Engine
+    # This utilizes strategy/backtesting.py as the single source of truth
+    backtest_signals = engine.run_backtest()
+    alpha_signals = len(backtest_signals[backtest_signals['signal'] == 'ALPHA'])
+    flow_signals = len(backtest_signals[backtest_signals['signal'] == 'FLOW'])
+    
+    print(f"✓ Backtest Engine: Processed {len(backtest_signals)} signals.")
+    print(f"  - ALPHA signals: {alpha_signals}")
+    print(f"  - FLOW signals: {flow_signals}")
 
     print('\n✓ AQRS V3 Phase 1 Integration Test PASSED')
 

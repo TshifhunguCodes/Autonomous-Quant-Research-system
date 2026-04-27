@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
 
+# Silence pandas future warnings regarding downcasting
+pd.set_option('future.no_silent_downcasting', True)
 
 def build_m5_features(df_m5: pd.DataFrame) -> pd.DataFrame:
     df = df_m5.sort_values("time").reset_index(drop=True).copy()
@@ -20,7 +22,7 @@ def build_m5_features(df_m5: pd.DataFrame) -> pd.DataFrame:
             (df["high"] - df["prev_close"]).abs(),
             (df["low"] - df["prev_close"]).abs()
         )
-    )
+    ).fillna(0.0) # Handle NaN in first row
     df["atr"] = df["tr"].rolling(14).mean()
 
     df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
@@ -83,6 +85,17 @@ def merge_h1_context_into_m5(
         on="time",
         direction="backward",
     )
+
+
+def build_simple_htf_bias(df_htf: pd.DataFrame, prefix: str) -> pd.DataFrame:
+    """Calculates simple candle bias (Bullish/Bearish) for higher timeframes based on last closed candle."""
+    df = df_htf.sort_values("time").reset_index(drop=True).copy()
+    # Bias of the last COMPLETED candle
+    df[f"{prefix}_bias"] = np.where(
+        df["close"].shift(1) > df["open"].shift(1), "bullish",
+        np.where(df["close"].shift(1) < df["open"].shift(1), "bearish", "neutral")
+    )
+    return df[["time", f"{prefix}_bias"]]
 
 
 def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
@@ -284,11 +297,11 @@ def build_setups(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def classify_trade(score):
-    if score >= 70:
+    if score >= 75:
         return "ELITE"
-    if score >= 60:
+    if score >= 65:
         return "HIGH"
-    if score >= 55:
+    if score >= 45:
         return "MEDIUM"
     return "NO_TRADE"
 
@@ -334,14 +347,36 @@ def build_confirmations(df: pd.DataFrame) -> pd.DataFrame:
             "confirm_score",
         ] += 15
     out.loc[buy_mask & (out["major_support"] == 1), "confirm_score"] += 20
+    
+    # Volume Profile Confluence: Retesting Previous Session VAH/VAL
+    if "near_prev_vah" in out.columns:
+        out.loc[buy_mask & (out["near_prev_vah"] == 1), "confirm_score"] += 10
+    
+    # Volume Profile Confluence: Retesting Previous Session POC
+    if "near_prev_poc" in out.columns:
+        out.loc[buy_mask & (out["near_prev_poc"] == 1), "confirm_score"] += 15
+
     if "h1_bias" in out.columns:
         out.loc[buy_mask & (out["h1_bias"] == "bullish"), "confirm_score"] += 10
-    # Reward stronger setups to catch higher-quality trade opportunities earlier
-    out.loc[buy_mask & (out["setup_score"] >= 65), "confirm_score"] += 5
-    out.loc[sell_mask & (out["setup_score"] >= 65), "confirm_score"] += 5
+
+    # SMC Refinement: Reward MSS and Midnight Open alignment
+    if "mss_bullish" in out.columns:
+        out.loc[buy_mask & (out["mss_bullish"] == True), "confirm_score"] += 15
+    if "ote_bullish" in out.columns:
+        out.loc[buy_mask & (out["ote_bullish"] == True), "confirm_score"] += 12
+    if "h4_bias" in out.columns:
+        out.loc[buy_mask & (out["h4_bias"] == "bullish"), "confirm_score"] += 5
+    if "d1_bias" in out.columns:
+        out.loc[buy_mask & (out["d1_bias"] == "bullish"), "confirm_score"] += 10
+    if "midnight_open" in out.columns:
+        # ICT Rule: Buy below Midnight Open (Discount of the Day)
+        out.loc[buy_mask & (out["close"] < out["midnight_open"]), "confirm_score"] += 10
+
+    # Raise thresholds: System now requires more confluence
+    out.loc[buy_mask & (out["setup_score"] >= 70), "confirm_score"] += 10
 
     out.loc[
-        (out["confirm_score"] >= 40) & (out["setup"] == "BUY_SETUP"),
+        (out["confirm_score"] >= 45) & (out["setup"] == "BUY_SETUP"),
         "confirmed_signal",
     ] = "buy"
     out.loc[sell_mask & out["is_indecision"], "confirm_score"] -= 15
@@ -358,10 +393,32 @@ def build_confirmations(df: pd.DataFrame) -> pd.DataFrame:
             "confirm_score",
         ] += 15
     out.loc[sell_mask & (out["major_resistance"] == 1), "confirm_score"] += 20
+
+    # Volume Profile Confluence: Retesting Previous Session VAH/VAL
+    if "near_prev_val" in out.columns:
+        out.loc[sell_mask & (out["near_prev_val"] == 1), "confirm_score"] += 10
+
+    # Volume Profile Confluence: Retesting Previous Session POC
+    if "near_prev_poc" in out.columns:
+        out.loc[sell_mask & (out["near_prev_poc"] == 1), "confirm_score"] += 15
+
     if "h1_bias" in out.columns:
         out.loc[sell_mask & (out["h1_bias"] == "bearish"), "confirm_score"] += 10
+        
+    if "mss_bearish" in out.columns:
+        out.loc[sell_mask & (out["mss_bearish"] == True), "confirm_score"] += 15
+    if "ote_bearish" in out.columns:
+        out.loc[sell_mask & (out["ote_bearish"] == True), "confirm_score"] += 12
+    if "h4_bias" in out.columns:
+        out.loc[sell_mask & (out["h4_bias"] == "bearish"), "confirm_score"] += 5
+    if "d1_bias" in out.columns:
+        out.loc[sell_mask & (out["d1_bias"] == "bearish"), "confirm_score"] += 10
+    if "midnight_open" in out.columns:
+        # ICT Rule: Sell above Midnight Open (Premium of the Day)
+        out.loc[sell_mask & (out["close"] > out["midnight_open"]), "confirm_score"] += 10
+
     out.loc[
-        (out["confirm_score"] >= 40) & (out["setup"] == "SELL_SETUP"),
+        (out["confirm_score"] >= 45) & (out["setup"] == "SELL_SETUP"),
         "confirmed_signal",
     ] = "sell"
 
@@ -486,19 +543,20 @@ def build_signals(df: pd.DataFrame) -> pd.DataFrame:
 
 def build_trade_setups(df: pd.DataFrame, config) -> pd.DataFrame:
     out = df.copy()
-    base_offset = config.risk.base_stop_buffer
     rr_ratio = config.risk.rr_ratio
-    state_multiplier = {
-        "TRENDING": 0.9,
-        "RANGING": 1.0,
-        "VOLATILE": 1.4,
-        "CHOPPY": 1.2,
-    }
 
     out["rr_ratio"] = rr_ratio
-    out["stop_buffer"] = (
-        out["market_state"].map(state_multiplier).fillna(1.0) * base_offset
+
+    # Sync with V3 RiskManager: ATR-based stops for Institutional Robustness
+    out["atr_val"] = out.get("atr", pd.Series(0.1, index=out.index)).fillna(0.1)
+    out["stop_distance"] = np.where(
+        out["quality"] == "ELITE",  # Alpha System (Sniper)
+        out["atr_val"] * 2.2,
+        out["atr_val"] * 1.8   # Flow System (Sensor)
     )
+    # Hard floor for spread protection (Institutional standard)
+    out["stop_distance"] = out["stop_distance"].clip(lower=8.0)
+
     out["entry_price"] = np.nan
     out["stop_loss"] = np.nan
     out["take_profit"] = np.nan
@@ -570,16 +628,15 @@ def build_trade_setups(df: pd.DataFrame, config) -> pd.DataFrame:
     buy_mask = (out["confirmed_signal"] == "buy")
     sell_mask = (out["confirmed_signal"] == "sell")
     out.loc[buy_mask, "entry_price"] = out["close"]
-    out.loc[buy_mask, "stop_loss"] = out["low"] - out["stop_buffer"]
-    buy_risk = out["close"] - (out["low"] - out["stop_buffer"])
-    out.loc[buy_mask, "risk_distance"] = buy_risk
-    out.loc[buy_mask, "take_profit"] = out["close"] + (buy_risk * rr_ratio)
+    out.loc[buy_mask, "stop_loss"] = out["close"] - out["stop_distance"]
+    out.loc[buy_mask, "risk_distance"] = out["stop_distance"]
+    out.loc[buy_mask, "take_profit"] = out["close"] + (out["stop_distance"] * rr_ratio)
 
     out.loc[sell_mask, "entry_price"] = out["close"]
-    out.loc[sell_mask, "stop_loss"] = out["high"] + out["stop_buffer"]
-    sell_risk = (out["high"] + out["stop_buffer"]) - out["close"]
-    out.loc[sell_mask, "risk_distance"] = sell_risk
-    out.loc[sell_mask, "take_profit"] = out["close"] - (sell_risk * rr_ratio)
+    out.loc[sell_mask, "stop_loss"] = out["close"] + out["stop_distance"]
+    out.loc[sell_mask, "risk_distance"] = out["stop_distance"]
+    out.loc[sell_mask, "take_profit"] = out["close"] - (out["stop_distance"] * rr_ratio)
+
     return out
 
 
@@ -589,6 +646,8 @@ def run_strategy_pipeline(
     config,
     return_stages: bool = False,
 ):
+    from strategy.smc_ict_engine import SMCEngine
+    from strategy.volume_profile_engine import VolumeProfileEngine
     features = build_m5_features(df_m5)
     with_h1 = merge_h1_context_into_m5(features, df_h1)
     structure = build_structure(with_h1)
@@ -597,7 +656,9 @@ def run_strategy_pipeline(
     regime = build_regime_layer(market_state, config)
     signals = build_signals(regime)
     setups = build_setups(signals)
-    confirmations = build_confirmations(setups)
+    with_vol = VolumeProfileEngine.enrich_intelligence(setups)
+    with_smc = SMCEngine.enrich_intelligence(with_vol)
+    confirmations = build_confirmations(with_smc)
     trade_setups = build_trade_setups(confirmations, config)
 
     if return_stages:
