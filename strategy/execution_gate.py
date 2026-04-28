@@ -1,6 +1,8 @@
 from core.logging_utils import get_logger
 import pandas as pd
 from strategy.smc_ict_engine import SMCEngine
+from pathlib import Path
+import numpy as np
 
 logger = get_logger(__name__)
 
@@ -9,10 +11,18 @@ class ExecutionGate:
     def evaluate_signal(config, signal):
         """Validates session, regime, and system selection rules."""
         hour = pd.to_datetime(signal["time"]).hour
-        quality = signal["quality"]
-        state = signal["market_state"]
-        score = signal["confirm_score"]
+        quality = signal.get("quality", "MEDIUM")
+        state = signal.get("market_state", "UNKNOWN")
+        score = signal.get("confirm_score", 0)
         
+        # Task 4: Slippage Guard
+        # Blocks if current price has moved too far from the research entry price
+        entry_price = float(signal.get("entry_price", 0))
+        current_price = signal.get("current_tick_price", entry_price)
+        max_slippage = getattr(config.market, "max_slippage_points", 10) * config.market.point_size
+        if entry_price > 0 and abs(current_price - entry_price) > max_slippage:
+            return False, "NONE", 0, "SLIPPAGE_GUARD_REJECTION", True
+
         # ICT Kill Zone Filter: Enforce high-volume windows for non-ELITE trades
         is_kill_zone = SMCEngine.is_ict_kill_zone(hour)
         if not is_kill_zone and quality != "ELITE":
@@ -42,7 +52,7 @@ class ExecutionGate:
             if not (signal.get("volume_spike", False) and signal.get("near_prev_poc", False)):
                 return False, "NONE", 0, "SMC_NO_VOLUME_SPIKE_AT_POC_REJECTION", True
 
-        # New: Cost Efficiency Gate
+        # Task 4: Cost Efficiency Gate (Spread Filter)
         # If current spread is > 40% of our Stop Distance, the trade is mathematically 
         # sub-optimal before it even starts.
         stop_dist = float(signal.get("stop_distance", 1.0))
@@ -50,6 +60,11 @@ class ExecutionGate:
         if stop_dist > 0 and (current_spread / stop_dist) > 0.4:
             return False, "NONE", 0, "COST_TO_REWARD_REJECTION", True
         
+        # Task 3 & 4: Adaptive Intelligence Logic
+        perf_multiplier = ExecutionGate.apply_adaptive_learning(config, signal)
+        if perf_multiplier == 0:
+            return False, "NONE", 0, "NEGATIVE_EXPECTANCY_ADAPTIVE_BLOCK", True
+
         # 1. System Selection logic
         alpha_eligible = (
             quality == "ELITE" and 
@@ -95,6 +110,54 @@ class ExecutionGate:
 
         # Calculate Lot
         base_lot = config.live.lot
-        final_lot = max(0.01, base_lot * lot_multiplier)
+        final_lot = max(0.01, base_lot * lot_multiplier * perf_multiplier)
         
         return True, system_type, final_lot, "PASS", is_exploratory
+
+    @staticmethod
+    def apply_adaptive_learning(config, signal):
+        """Calculates risk multiplier based on historical outcome expectancy."""
+        outcomes_path = Path("data/live/trade_outcomes.csv")
+        if not outcomes_path.exists():
+            return 1.0
+
+        try:
+            df = pd.read_csv(outcomes_path)
+            if len(df) < 30: return 1.0 # Minimum statistical floor for adaptive learning
+
+            # Define the current regime context for lookup
+            current_behavior = signal.get("behavior_label", "UNKNOWN")
+            current_regime = signal.get("market_regime", "NEUTRAL")
+            current_session = signal.get("session", "UNKNOWN")
+
+            # Filter for current regime context
+            context = df[
+                (df["behavior_label"] == current_behavior) &
+                (df["market_regime"] == current_regime) &
+                (df["session"] == current_session)
+            ]
+
+            if context.empty or len(context) < 10: # Need at least 10 trades in this specific context
+                return 1.0
+
+            net_pnl = context["pnl"].sum()
+            trades = len(context)
+            gross_profit = context[context["pnl"] > 0]["pnl"].sum()
+            gross_loss = abs(context[context["pnl"] < 0]["pnl"].sum())
+            pf = gross_profit / gross_loss if gross_loss > 0 else (2.0 if gross_profit > 0 else 1.0) # Handle zero gross_loss
+
+            # Task 3: Auto-reduce for negative expectancy
+            if net_pnl < 0 and trades >= 30: # Require more samples for reduction
+                logger.warning("📉 Adaptive Learning: Reducing risk for %s/%s/%s due to negative expectancy (PF: %.2f, Trades: %d).", 
+                               current_behavior, current_regime, current_session, pf, trades)
+                return 0.5
+
+            # Task 4: Auto-promote high-performers
+            if pf > 1.5 and trades >= 50: # Higher PF and more samples for promotion
+                logger.info("🚀 Adaptive Learning: Promoting risk for %s/%s/%s (PF: %.2f, Trades: %d).", 
+                            current_behavior, current_regime, current_session, pf, trades)
+                return 1.25
+
+            return 1.0
+        except Exception:
+            return 1.0

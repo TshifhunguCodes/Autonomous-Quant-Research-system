@@ -1,4 +1,5 @@
 import pandas as pd
+from pathlib import Path
 
 from core.logging_utils import get_logger
 from strategy.decision_report import generate_decision_report, generate_stress_validation_report
@@ -61,7 +62,8 @@ def _format_terminal_summary(stats, summary_rows: list[pd.Series], session_df, t
 
 
 def run(config, print_terminal: bool = False):
-    df = pd.read_csv(config.paths.trade_setups, parse_dates=["time"], low_memory=False)
+    trade_setups_path = getattr(config.paths, "trade_setups", Path("data/features/trade_setups.csv"))
+    df = pd.read_csv(trade_setups_path, parse_dates=["time"], low_memory=False)
 
     stats = {
         "zone_hits": int(
@@ -78,6 +80,7 @@ def run(config, print_terminal: bool = False):
         "medium_count": int((df["quality"] == "MEDIUM").sum()),
     }
 
+    backtest_dir = getattr(config.paths, "backtest_dir", Path("data/backtest"))
     logger.info(
         "Pipeline report | zone_hits=%s setups=%s confirmed=%s entries=%s h1_aligned=%s elite=%s high=%s medium=%s",
         stats["zone_hits"],
@@ -105,7 +108,7 @@ def run(config, print_terminal: bool = False):
     weak_setup = setup_df.sort_values("net_pnl").iloc[0] if not setup_df.empty else None
 
     # Comparative System Report
-    regime_path = config.paths.backtest_dir / "system_regime_performance.csv"
+    regime_path = backtest_dir / "system_regime_performance.csv"
     if regime_path.exists():
         regime_df = pd.read_csv(regime_path)
         print("\n--- SYSTEM COMPARISON BY REGIME ---")

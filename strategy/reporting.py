@@ -1,4 +1,5 @@
 import pandas as pd
+from pathlib import Path
 
 from core.logging_utils import get_logger
 from strategy.backtesting import run_backtest_frame
@@ -442,7 +443,8 @@ def _generate_ny_deep_dive(trades_df):
 
 
 def run(config, rolling_window_days=30, rolling_step_days=7):
-    df = pd.read_csv(config.paths.trade_setups, parse_dates=["time"], low_memory=False)
+    trade_setups_path = getattr(config.paths, "trade_setups", Path("data/features/trade_setups.csv"))
+    df = pd.read_csv(trade_setups_path, parse_dates=["time"], low_memory=False)
     windows = _build_rolling_windows(
         df,
         window_days=rolling_window_days,
@@ -466,7 +468,8 @@ def run(config, rolling_window_days=30, rolling_step_days=7):
 
         rolling_df = pd.DataFrame(rolling_rows)
         out_name = f"rolling_{system_label.lower()}_summary.csv"
-        rolling_df.to_csv(config.paths.backtest_dir / out_name, index=False)
+        backtest_dir = getattr(config.paths, "backtest_dir", Path("data/backtest"))
+        rolling_df.to_csv(backtest_dir / out_name, index=False)
 
         # Calculate Stability Metrics
         if not rolling_df.empty and len(rolling_df) > 1:
@@ -486,7 +489,7 @@ def run(config, rolling_window_days=30, rolling_step_days=7):
 
     if stability_stats:
         stability_df = pd.DataFrame(stability_stats)
-        stability_path = config.paths.backtest_dir / "consolidated_stability_report.csv"
+        stability_path = backtest_dir / "consolidated_stability_report.csv"
         stability_df.to_csv(stability_path, index=False)
         
         print("\n" + "="*95)
@@ -498,7 +501,7 @@ def run(config, rolling_window_days=30, rolling_step_days=7):
     full_trades = pd.read_csv(config.paths.backtest_trades, parse_dates=["signal_time", "exit_time"])
     
     regime_perf = _summarize_system_regime_performance(full_trades)
-    regime_perf.to_csv(config.paths.backtest_dir / "system_regime_performance.csv", index=False)
+    regime_perf.to_csv(backtest_dir / "system_regime_performance.csv", index=False)
 
     # Generate NY Before-vs-After Metrics for terminal display
     ny_perf = regime_perf[regime_perf["regime_value"] == "NEW_YORK"].copy()

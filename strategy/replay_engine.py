@@ -175,33 +175,19 @@ def run_replay_frame(
                 action = "SKIP_INVALID_TRADE"
                 action_reason = "risk or reward distance was invalid"
 
-        decision_records.append(
-            {
-                "time": current_time,
-                "m5_bars_seen": idx + 1,
-                "h1_bars_seen": int((h1["time"] <= current_time).sum()),
-                "signal": latest.get("signal", "NO_TRADE"),
-                "bias": latest.get("bias", "NONE"),
-                "setup": latest.get("setup", "NONE"),
-                "quality": latest.get("quality", "NO_TRADE"),
-                "confirmed_signal": latest.get("confirmed_signal", "no_trade"),
-                "market_state": latest.get("market_state", "UNKNOWN"),
-                "h1_bias": latest.get("h1_bias", "neutral"),
-                "h1_alignment": latest.get("h1_alignment", 0),
-                "score": latest.get("score", 0),
-                "setup_score": latest.get("setup_score", 0),
-                "confirm_score": latest.get("confirm_score", 0),
-                "entry_price": latest.get("entry_price"),
-                "stop_loss": latest.get("stop_loss"),
-                "take_profit": latest.get("take_profit"),
-                "action": action,
-                "action_reason": action_reason,
-                "resolved_this_candle": resolved_this_candle,
-                "opened_this_candle": opened_this_candle,
-                "active_trades_after_decision": len(active_trades),
-                "equity_after_decision": round(equity, 2),
-            }
-        )
+        # Start with all intelligence from the pipeline (which includes OHLC), then add replay-specific metadata
+        decision_entry = latest.to_dict()
+        decision_entry.update({
+            "m5_bars_seen": idx + 1,
+            "h1_bars_seen": int((h1["time"] <= current_time).sum()), # Count H1 bars up to current M5 time
+            "action": action,
+            "action_reason": action_reason,
+            "resolved_this_candle": resolved_this_candle,
+            "opened_this_candle": opened_this_candle,
+            "active_trades_after_decision": len(active_trades),
+            "equity_after_decision": round(equity, 2),
+        })
+        decision_records.append(decision_entry)
 
     for active_trade in active_trades:
         trade_records.append(
@@ -272,4 +258,4 @@ def run(config, start=None, end=None, max_candles=None):
     logger.info("Replay events saved at %s", config.paths.replay_events)
     logger.info("Replay trades saved at %s", config.paths.replay_trades)
     logger.info("Replay summary saved at %s", config.paths.replay_summary)
-    return result["summary"]
+    return result["decisions"]

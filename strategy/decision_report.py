@@ -1,4 +1,5 @@
 import pandas as pd
+from pathlib import Path
 from core.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -7,7 +8,8 @@ def generate_decision_report(config):
     """
     Evaluates system validity and provides recommendations based on regime performance data.
     """
-    path = config.paths.backtest_dir / "system_regime_performance.csv"
+    backtest_dir = getattr(config.paths, "backtest_dir", Path("data/backtest"))
+    path = backtest_dir / "system_regime_performance.csv"
     if not path.exists():
         return "Governance Report: system_regime_performance.csv not found. Run backtest first."
 
@@ -92,7 +94,8 @@ def generate_stress_validation_report(config):
     """
     is_path = config.paths.backtest_summary.parent / "in_sample_summary.csv"
     oos_path = config.paths.backtest_summary.parent / "out_of_sample_summary.csv"
-    stability_path = config.paths.backtest_dir / "consolidated_stability_report.csv"
+    backtest_dir = getattr(config.paths, "backtest_dir", Path("data/backtest"))
+    stability_path = backtest_dir / "consolidated_stability_report.csv"
     trades_path = config.paths.backtest_trades
 
     if not (is_path.exists() and oos_path.exists()):
@@ -108,7 +111,7 @@ def generate_stress_validation_report(config):
         oos_sum = oos_df.iloc[0]
 
         # 0. Sample Adequacy Gates
-        regime_perf_path = config.paths.backtest_dir / "system_regime_performance.csv"
+        regime_perf_path = backtest_dir / "system_regime_performance.csv"
         if not regime_perf_path.exists():
             return "Stress Validation Report: ⚠️ INSUFFICIENT DATA (not aborted)"
 

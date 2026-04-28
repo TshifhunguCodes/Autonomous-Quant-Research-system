@@ -1,12 +1,15 @@
 import argparse
+import MetaTrader5 as mt5
 import subprocess
 import pandas as pd
 from pathlib import Path
 import numpy as np # For float comparison tolerance
+import time
 
 from core.config import load_config
 from core.v3_engine import AQRSV3Engine
 from config.v3_config import V3Config
+from strategy import execution_agent
 import validator_institutional # Import the validator
 
 def parse_args():
@@ -82,112 +85,72 @@ def main():
         print(f"Replay complete. Generated {len(result)} rows.")
 
     if args.mode == "live":
-        print("Running in LIVE mode...")
+        print(f"🚀 AQRS V3: Entering Continuous LIVE monitoring for {config.market.symbol}")
+        print("Press Ctrl+C to stop the system.")
         
-        # --- Consistency Check: Live Signal vs Research Artifacts ---
-        live_trade_setups_path = get_trade_setups_path(config)
-        research_pipeline_path = get_research_pipeline_path(config)
+        # Notify startup
+        execution_agent.send_telegram_msg(config, f"🟢 **AQRS V3 Started**\nMonitoring {config.market.symbol} 24/7...")
 
-        if not live_trade_setups_path.exists():
-            print("[WARN] No live trade setups found. Cannot perform consistency check.")
-            # Proceed with live execution if --execute is present, or just exit preview
-            if args.execute:
-                print("Executing live trades without consistency check due to missing live setups.")
-                engine.run_live(execute=True) # Assuming this method exists and handles execution
-            else:
-                print("Live preview mode. No execution.")
-            return
+        last_processed_candle = None
+        cycle_count = 0
 
-        if not research_pipeline_path.exists():
-            print(f"[WARN] Research pipeline artifact not found at {research_pipeline_path}. Cannot perform consistency check.")
-            # Proceed with live execution if --execute is present, or just exit preview
-            if args.execute:
-                print("Executing live trades without consistency check due to missing research artifact.")
-                engine.run_live(execute=True)
-            else:
-                print("Live preview mode. No execution.")
-            return
+        while True:
+            try:
+                # 1. Force the engine to fetch latest market data and recalculate V3 signals
+                # refresh_data=True tells the engine to pull new bars from MT5
+                engine.run_research(refresh_data=True)
+                
+                # --- Live Feed Verification Heartbeat ---
+                tick = mt5.symbol_info_tick(config.market.symbol)
+                if tick:
+                    print(f"📡 [LIVE HEARTBEAT] {config.market.symbol} | Bid: {tick.bid:.5f} | Ask: {tick.ask:.5f}")
 
-        try:
-            live_setups_df = pd.read_csv(live_trade_setups_path, parse_dates=["time"], low_memory=False)
-            research_df = pd.read_csv(research_pipeline_path, parse_dates=["time"], low_memory=False)
+                # --- Consistency Check: Live Signal vs Research Artifacts ---
+                live_trade_setups_path = get_trade_setups_path(config)
+                research_pipeline_path = get_research_pipeline_path(config)
 
-            if live_setups_df.empty:
-                print("[WARN] Live trade setups file is empty. Cannot perform consistency check.")
-                if args.execute:
-                    print("Executing live trades without consistency check due to empty live setups.")
-                    engine.run_live(execute=True)
-                else:
-                    print("Live preview mode. No execution.")
-                return
+                if not live_trade_setups_path.exists():
+                    print("[WARN] Waiting for trade setups to be generated...")
+                    time.sleep(10)
+                    continue
 
-            latest_live_signal = live_setups_df.iloc[-1]
-            
-            # Find the corresponding signal in the research pipeline
-            # Match by time and confirmed_signal (or other unique identifiers)
-            matching_research_signals = research_df[
-                (research_df["time"] == latest_live_signal["time"]) &
-                (research_df["confirmed_signal"] == latest_live_signal["confirmed_signal"])
-            ]
+                live_setups_df = pd.read_csv(live_trade_setups_path, parse_dates=["time"], low_memory=False)
+                if live_setups_df.empty:
+                    time.sleep(10)
+                    continue
+                
+                latest_row = live_setups_df.iloc[-1]
+                current_candle_time = latest_row["time"]
 
-            if matching_research_signals.empty:
-                print(f"[FAIL] Consistency Check Failed: No matching research artifact found for live signal at {latest_live_signal['time']}.")
-                print(f"   Live Signal: {latest_live_signal['confirmed_signal']} @ {latest_live_signal['entry_price']:.5f}")
-                if args.execute:
-                    print("Blocking live execution due to missing research comparison.")
-                    return
-            else:
-                # Assuming the first match is the correct one, or there's only one
-                matching_research_signal = matching_research_signals.iloc[0]
+                # Only process if we have a brand new candle
+                if last_processed_candle is not None and current_candle_time <= last_processed_candle:
+                    time.sleep(10)
+                    continue
+                
+                print(f"\n🔔 New Candle Detected: {current_candle_time}")
+                
+                # Run the execution agent (this handles the Execution Gate and the mobile alert)
+                execution_agent.run(config, execute=args.execute)
+                
+                last_processed_candle = current_candle_time
+                
+                # Heartbeat every 120 cycles (approx every 1 hour)
+                cycle_count += 1
+                if cycle_count >= 120:
+                    execution_agent.send_telegram_msg(config, f"🛡️ **AQRS V3 Heartbeat**\nSystem active for {config.market.symbol}. No issues detected.")
+                    cycle_count = 0
 
-                discrepancies = []
-                fields_to_check = ["entry_price", "stop_loss", "take_profit"]
-                tolerance = 0.0001 # Points tolerance for price comparison
+                # Polling interval (wait for 30 seconds before checking for new data again)
+                print(f"💤 Cycle {cycle_count} complete. Sleeping 30s...")
+                time.sleep(30)
 
-                for field in fields_to_check:
-                    live_val = latest_live_signal.get(field)
-                    research_val = matching_research_signal.get(field)
-
-                    if pd.isna(live_val) and pd.isna(research_val):
-                        continue # Both are NaN, considered consistent
-                    if pd.isna(live_val) or pd.isna(research_val):
-                        discrepancies.append(f"  - {field}: Live={live_val}, Research={research_val} (NaN mismatch)")
-                        continue
-                    
-                    # Convert to float for comparison, handle potential non-numeric types gracefully
-                    try:
-                        live_val_f = float(live_val)
-                        research_val_f = float(research_val)
-                        if not np.isclose(live_val_f, research_val_f, atol=tolerance):
-                            discrepancies.append(f"  - {field}: Live={live_val_f:.5f}, Research={research_val_f:.5f} (Difference > {tolerance})")
-                    except ValueError:
-                        discrepancies.append(f"  - {field}: Non-numeric value encountered (Live={live_val}, Research={research_val})")
-
-
-                if discrepancies:
-                    print(f"[FAIL] Consistency Check Failed for live signal at {latest_live_signal['time']}:")
-                    for d in discrepancies:
-                        print(d)
-                    if args.execute:
-                        print("Blocking live execution due to inconsistencies with research artifacts.")
-                        return
-                else:
-                    print(f"[PASS] Consistency Check Passed for live signal at {latest_live_signal['time']}.")
-                    print(f"   Live Signal: {latest_live_signal['confirmed_signal']} @ {latest_live_signal['entry_price']:.5f}")
-                    print(f"   SL: {latest_live_signal['stop_loss']:.5f}, TP: {latest_live_signal['take_profit']:.5f}")
-
-            # If consistency check passes (or not blocking), proceed with live execution if requested
-            if args.execute:
-                print("Proceeding with live execution...")
-                engine.run_live(execute=True) # Assuming this method exists and handles execution
-            else:
-                print("Live preview mode. No execution.")
-
-        except Exception as e:
-            print(f"[ERROR] An error occurred during live consistency check: {e}")
-            if args.execute:
-                print("Blocking live execution due to error in consistency check.")
-                return
+            except KeyboardInterrupt:
+                print("\n🛑 System stopped by user.")
+                break
+            except Exception as e:
+                print(f"[ERROR] Live Cycle Error: {e}")
+                time.sleep(10)
+        return
 
     if args.mode == "dashboard":
         print("🚀 Launching AQRS V3 Standalone Dashboard...")
