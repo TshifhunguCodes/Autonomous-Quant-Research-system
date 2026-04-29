@@ -3,6 +3,8 @@ from typing import Any
 
 import pandas as pd
 
+from agents.cleaning_agent import run as clean_data
+from agents.data_agent import run as fetch_data
 from config.v3_config import V3Config
 from engines import MarketBehaviorEngine, PriceActionStructureEngine, ZoneEngine
 from replay.replay_engine import ReplayEngine
@@ -34,6 +36,9 @@ class AQRSV3Engine:
         return df
 
     def run_research(self, df: pd.DataFrame | None = None, refresh_data: bool = False) -> pd.DataFrame:
+        if refresh_data:
+            fetch_data(self.config.base)
+            clean_data(self.config.base)
         if df is None:
             df = self._load_data()
         pipeline = self.behavior.classify_market(df)
@@ -43,6 +48,7 @@ class AQRSV3Engine:
         pipeline = self.flow.generate_flow_setups(pipeline)
         pipeline = self._resolve_signals(pipeline)
         pipeline = self.risk.annotate_trade_risk(pipeline)
+        pipeline = self._annotate_execution_compatibility(pipeline)
         return pipeline
 
     def run_backtest(self, df: pd.DataFrame | None = None) -> pd.DataFrame:
@@ -71,5 +77,20 @@ class AQRSV3Engine:
         out["confirm_score"] = 0.0
         out.loc[out["signal"] == "ALPHA", "confirm_score"] = out["alpha_score"]
         out.loc[out["signal"] == "FLOW", "confirm_score"] = out["flow_score"]
+
+        return out
+
+    def _annotate_execution_compatibility(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add legacy execution columns expected by the live execution agent."""
+        out = df.copy()
+        out["quality"] = "NONE"
+        out.loc[out["confirm_score"] >= 55, "quality"] = "MEDIUM"
+        out.loc[out["confirm_score"] >= 70, "quality"] = "HIGH"
+        out.loc[out["confirm_score"] >= 85, "quality"] = "ELITE"
+        out.loc[out["signal"] == "NO_TRADE", "quality"] = "NONE"
+        out["confirmed_signal"] = "no_trade"
+        out.loc[(out["signal"].isin(["ALPHA", "FLOW"])) & (out["direction"] == "LONG"), "confirmed_signal"] = "buy"
+        out.loc[(out["signal"].isin(["ALPHA", "FLOW"])) & (out["direction"] == "SHORT"), "confirmed_signal"] = "sell"
+        out["market_regime"] = out["behavior_label"]
 
         return out

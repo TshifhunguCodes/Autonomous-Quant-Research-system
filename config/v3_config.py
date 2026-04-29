@@ -14,6 +14,8 @@ class V3Config:
         self.regime = base_config.regime
         self.live = getattr(base_config, "live", None)
         self.session_filters = getattr(base_config, "session_filters", None)
+        self.smc = getattr(base_config, "smc", None)
+        self.telegram = getattr(base_config, "telegram", None)
         self.paths = self._build_paths(base_config)
 
     def _build_paths(self, base_config: Any) -> Any:
@@ -21,8 +23,8 @@ class V3Config:
             pass
 
         paths = Paths()
-        paths.clean_m5 = Path(base_config.paths.clean_m5)
-        paths.raw_m5 = Path(base_config.paths.raw_m5)
+        for name, value in vars(base_config.paths).items():
+            setattr(paths, name, Path(value) if isinstance(value, (str, Path)) else value)
         return paths
 
     @classmethod

@@ -213,6 +213,20 @@ class SessionFiltersConfig:
 
 
 @dataclass(frozen=True)
+class SMCConfig:
+    min_smc_score: int = 55
+    require_kill_zone: bool = False
+    require_ob_or_fvg: bool = True
+    require_volume_spike_at_poc: bool = True
+
+
+@dataclass(frozen=True)
+class TelegramConfig:
+    bot_token: str = ""
+    chat_id: str = ""
+
+
+@dataclass(frozen=True)
 class LoggingConfig:
     level: str = "INFO"
 
@@ -227,6 +241,8 @@ class AppConfig:
     backtest: BacktestConfig
     live: LiveConfig
     session_filters: SessionFiltersConfig
+    smc: SMCConfig
+    telegram: TelegramConfig
     logging: LoggingConfig
 
 
@@ -255,6 +271,8 @@ def load_config(config_path: str | None = None) -> AppConfig:
         backtest=BacktestConfig(**_section(payload, "backtest")),
         live=LiveConfig(**_section(payload, "live")),
         session_filters=SessionFiltersConfig(**_section(payload, "session_filters")),
+        smc=SMCConfig(**_section(payload, "smc")),
+        telegram=TelegramConfig(**_section(payload, "telegram")),
         logging=LoggingConfig(**_section(payload, "logging")),
     )
 

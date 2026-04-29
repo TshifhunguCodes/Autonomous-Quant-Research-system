@@ -56,13 +56,15 @@ class MarketBehaviorEngine:
         out["slope"] = out["ema20"].diff().fillna(0.0)
         out["high_20"] = out["high"].rolling(20, min_periods=1).max().shift(1)
         out["low_20"] = out["low"].rolling(20, min_periods=1).min().shift(1)
-        out["tr"] = np.maximum(
-            out["high"] - out["low"],
-            np.maximum(
+        tr_components = pd.concat(
+            [
+                out["high"] - out["low"],
                 (out["high"] - out["prev_close"]).abs(),
                 (out["low"] - out["prev_close"]).abs(),
-            ),
+            ],
+            axis=1,
         )
+        out["tr"] = tr_components.max(axis=1)
         out["atr14"] = out["tr"].rolling(14, min_periods=1).mean()
         out["avg_tr_20"] = out["tr"].rolling(20, min_periods=1).mean()
         out["range"] = out["high"] - out["low"]

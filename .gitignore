@@ -3,8 +3,25 @@ __pycache__/
 *.pyo
 *.pyd
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+
+.env
+.env.*
+!.env.example
+
 logs/
+
 data/research/
 data/backtest/
 data/replay/
+data/stress/
+data/latest_extract/
 data/live/execution_log.csv
+data/live/trade_outcomes.csv
+
+# Large/generated market data. Keep deliberately curated fixtures under tests/fixtures.
+data/raw/
+data/clean/
+data/features/

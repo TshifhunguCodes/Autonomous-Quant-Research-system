@@ -74,7 +74,8 @@ class ReplayEngine:
 
         latest = pipeline.iloc[-1].to_dict()
         trade_event = self._update_positions(latest)
-        if latest.get("signal") in ["ALPHA", "FLOW"]:
+        allow_overlap = bool(getattr(self.config.backtest, "allow_overlapping_positions", False))
+        if latest.get("signal") in ["ALPHA", "FLOW"] and (allow_overlap or not self.positions):
             self._open_position(latest)
 
         record = {
@@ -103,15 +104,19 @@ class ReplayEngine:
     def _open_position(self, latest: dict[str, Any]) -> None:
         if latest.get("signal") == "NO_TRADE":
             return
-        side = "BUY" if latest.get("behavior_label") == "TREND_UP" else "SELL"
-        if latest.get("behavior_label") == "TREND_DOWN":
-            side = "SELL"
+        side = "BUY" if latest.get("direction") == "LONG" else "SELL"
+        entry = float(latest.get("entry_price", latest.get("close", 0.0)))
+        stop_loss = float(latest.get("stop_loss", 0.0))
+        stop_distance = abs(entry - stop_loss)
+        if stop_distance <= 0:
+            return
         position = {
             "opened_at": latest.get("time"),
             "side": side,
-            "entry": float(latest.get("close", 0.0)),
-            "stop_loss": float(latest.get("stop_loss", 0.0)),
+            "entry": entry,
+            "stop_loss": stop_loss,
             "take_profit": float(latest.get("take_profit", 0.0)),
+            "stop_distance": stop_distance,
             "risk_amount": float(latest.get("position_risk", 0.0)),
             "signal": latest.get("signal"),
             "alpha_score": float(latest.get("alpha_score", 0.0)),
@@ -133,23 +138,23 @@ class ReplayEngine:
             closed = False
             if position["side"] == "BUY":
                 if current_low <= position["stop_loss"]:
-                    pnl = (position["stop_loss"] - position["entry"]) * position["risk_amount"]
+                    pnl = self._position_pnl(position, position["stop_loss"])
                     self.equity += pnl
                     event = {"closed": "SL", "pnl": float(pnl), "time": current_time}
                     closed = True
                 elif current_high >= position["take_profit"]:
-                    pnl = (position["take_profit"] - position["entry"]) * position["risk_amount"]
+                    pnl = self._position_pnl(position, position["take_profit"])
                     self.equity += pnl
                     event = {"closed": "TP", "pnl": float(pnl), "time": current_time}
                     closed = True
             else:
                 if current_high >= position["stop_loss"]:
-                    pnl = (position["entry"] - position["stop_loss"]) * position["risk_amount"]
+                    pnl = self._position_pnl(position, position["stop_loss"])
                     self.equity += pnl
                     event = {"closed": "SL", "pnl": float(pnl), "time": current_time}
                     closed = True
                 elif current_low <= position["take_profit"]:
-                    pnl = (position["entry"] - position["take_profit"]) * position["risk_amount"]
+                    pnl = self._position_pnl(position, position["take_profit"])
                     self.equity += pnl
                     event = {"closed": "TP", "pnl": float(pnl), "time": current_time}
                     closed = True
@@ -160,3 +165,8 @@ class ReplayEngine:
 
         self.positions = remaining_positions
         return event
+
+    def _position_pnl(self, position: dict[str, Any], exit_price: float) -> float:
+        direction = 1.0 if position["side"] == "BUY" else -1.0
+        r_multiple = direction * (float(exit_price) - position["entry"]) / position["stop_distance"]
+        return r_multiple * position["risk_amount"]

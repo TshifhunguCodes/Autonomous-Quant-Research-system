@@ -12,8 +12,15 @@ class ExecutionGate:
         """Validates session, regime, and system selection rules."""
         hour = pd.to_datetime(signal["time"]).hour
         quality = signal.get("quality", "MEDIUM")
-        state = signal.get("market_state", "UNKNOWN")
+        state = signal.get("market_state", signal.get("market_regime", signal.get("behavior_label", "UNKNOWN")))
         score = signal.get("confirm_score", 0)
+
+        if getattr(config.live, "relaxed_demo_gate", False):
+            system_type = "ALPHA" if signal.get("signal") == "ALPHA" else "FLOW_EXP"
+            is_exploratory = system_type != "ALPHA"
+            lot_multiplier = 1.0 if system_type == "ALPHA" else getattr(config.regime, "flow_risk_multiplier", 0.5)
+            final_lot = max(0.01, config.live.lot * lot_multiplier)
+            return True, system_type, final_lot, "RELAXED_DEMO_PASS", is_exploratory
         
         # Task 4: Slippage Guard
         # Blocks if current price has moved too far from the research entry price

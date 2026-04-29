@@ -515,21 +515,17 @@ class InstitutionalValidator:
 
 
 def main():
-    # Load pipeline data
     df = pd.read_csv("data/backtest/v3_research_output.csv", parse_dates=["time"])
 
-    # Load config
-    from core.config import load_config
     from config.v3_config import V3Config
+    from core.config import load_config
 
     base_config = load_config()
     config = V3Config.load_from(base_config)
 
-    # Run validation
     validator = InstitutionalValidator(df, config)
     results = validator.run_full_suite()
 
-    # Print summary
     print("\n" + "=" * 70)
     print("AQRS V3 INSTITUTIONAL VALIDATION RESULTS")
     print("=" * 70)
@@ -541,9 +537,9 @@ def main():
             if isinstance(value, list):
                 continue
             if isinstance(value, float):
-                print(f"  └─ {key}: {value:.2f}")
+                print(f"  - {key}: {value:.2f}")
             else:
-                print(f"  └─ {key}: {value}")
+                print(f"  - {key}: {value}")
         if result["warnings"]:
             for warning in result["warnings"]:
                 if warning:
@@ -551,11 +547,10 @@ def main():
 
     readiness = results["readiness_score"]
     print("\n" + "=" * 70)
-    print(f"READINESS SCORE: {readiness['score']:.1f}/100 → {readiness['tier']}")
+    print(f"READINESS SCORE: {readiness['score']:.1f}/100 -> {readiness['tier']}")
     print(f"Tests Passed: {readiness['passed_tests']}/{readiness['total_tests']}")
     print("=" * 70)
 
-    # Save results
     output_path = Path("data/backtest/v3_validation_report.json")
     output_path.write_text(json.dumps(results, indent=2, cls=NumpyEncoder))
     print(f"\n[OK] Full validation report saved to {output_path}")

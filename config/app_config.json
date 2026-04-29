@@ -56,6 +56,10 @@
     "require_ob_or_fvg": true,
     "require_volume_spike_at_poc": true
   },
+  "telegram": {
+    "bot_token": "8728107155:AAErj5Vo7rYsFkrTzD0nKtFh0JNC3_q3Wek",
+    "chat_id": "1478215774"
+  },
   "session_filters": {
     "disable_late_session": false,
     "late_session_start_hour": 20,
