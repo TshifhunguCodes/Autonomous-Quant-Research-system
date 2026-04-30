@@ -146,12 +146,18 @@ def run_live_mode(args, config, engine):
             terminal_info = mt5.terminal_info()
             tick = mt5.symbol_info_tick(config.market.symbol)
             if tick and terminal_info:
-                tick_time = pd.to_datetime(tick.time, unit="s").strftime("%H:%M:%S")
-                local_time = datetime.now().strftime("%H:%M:%S")
+                broker_dt = pd.to_datetime(tick.time, unit="s")
+                local_dt = datetime.now()
+                
+                # Calculate the hour offset for the heartbeat display
+                raw_diff_seconds = (local_dt - broker_dt).total_seconds()
+                hour_offset = round(raw_diff_seconds / 3600)
+                
                 conn_status = "CONNECTED" if terminal_info.connected else "DISCONNECTED"
                 print(
                     f"[LIVE HEARTBEAT] {config.market.symbol} | Bid: {tick.bid:.5f} | Ask: {tick.ask:.5f} | "
-                    f"Broker Time: {tick_time} | Local Time: {local_time} | {conn_status}"
+                    f"Broker Time: {broker_dt.strftime('%H:%M:%S')} | Local Time: {local_dt.strftime('%H:%M:%S')} | "
+                    f"Offset: {hour_offset:+.0f}h | {conn_status}"
                 )
 
                 if not terminal_info.connected:

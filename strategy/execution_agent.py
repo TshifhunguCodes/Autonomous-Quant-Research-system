@@ -318,5 +318,7 @@ def _is_signal_fresh(last_signal, tick, config):
     else:
         latency = abs(raw_latency)
     
-    max_latency = getattr(config.live, "max_signal_age_minutes", 5) * 60
+    # Add a 60-second "Processing Buffer" to account for pipeline calculation time
+    # and polling intervals, so 301s doesn't cause a rejection.
+    max_latency = (getattr(config.live, "max_signal_age_minutes", 5) * 60) + 60
     return (latency <= max_latency), latency, max_latency

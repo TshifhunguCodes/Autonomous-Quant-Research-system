@@ -46,7 +46,7 @@
     "allow_duplicate_candle": false,
     "require_h1_alignment": true,
     "disallowed_market_states": ["CHOPPY"],
-    "max_signal_age_minutes": 5,
+     "max_signal_age_minutes": 7,
     "max_spread_points": 25.0
   
   },
