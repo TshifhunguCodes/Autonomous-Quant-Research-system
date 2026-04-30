@@ -169,6 +169,13 @@ def _build_trade_base(row, config, equity, risk_adj=1.0, is_exploratory=False):
     if risk_distance <= 0 or reward_distance <= 0:
         return None
 
+    # --- SPREAD & SLIPPAGE RESILIENCE GUARD ---
+    total_cost = spread_price + slippage_price
+    cost_ratio = total_cost / risk_distance if risk_distance > 0 else 1.0
+    max_allowed_cost_ratio = getattr(config.risk, 'max_cost_ratio', 0.20)
+    if cost_ratio > max_allowed_cost_ratio:
+        return None
+
     if hasattr(config.backtest, 'dynamic_risk_scaling') and config.backtest.dynamic_risk_scaling:
         if equity <= 100:
             risk_pct = 0.005

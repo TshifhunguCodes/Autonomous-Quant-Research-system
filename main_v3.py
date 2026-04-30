@@ -147,10 +147,11 @@ def run_live_mode(args, config, engine):
             tick = mt5.symbol_info_tick(config.market.symbol)
             if tick and terminal_info:
                 tick_time = pd.to_datetime(tick.time, unit="s").strftime("%H:%M:%S")
+                local_time = datetime.now().strftime("%H:%M:%S")
                 conn_status = "CONNECTED" if terminal_info.connected else "DISCONNECTED"
                 print(
-                    f"[LIVE HEARTBEAT] {config.market.symbol} | Bid: {tick.bid:.5f} | "
-                    f"Ask: {tick.ask:.5f} | Feed Time: {tick_time} | {conn_status}"
+                    f"[LIVE HEARTBEAT] {config.market.symbol} | Bid: {tick.bid:.5f} | Ask: {tick.ask:.5f} | "
+                    f"Broker Time: {tick_time} | Local Time: {local_time} | {conn_status}"
                 )
 
                 if not terminal_info.connected:

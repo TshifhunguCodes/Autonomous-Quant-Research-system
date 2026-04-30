@@ -40,16 +40,25 @@ class MT5Bridge:
         logger.info("✅ MT5 Bridge connected to DEMO account: %s", acc_info.login)
         return True
 
-    def is_candle_already_traded(self, symbol, candle_time):
+    def is_candle_already_traded(self, symbol, candle_time, allow_overlap=False):
         """Checks active positions to prevent double execution on the same bar."""
         positions = mt5.positions_get(symbol=symbol)
-        if positions:
+        if not positions:
+            return False, ""
+
+        # If overlapping positions are disabled, block if ANY position exists
+        if not allow_overlap and len(positions) > 0:
+            return True, "OVERLAP_BLOCKED: Overlapping positions are disabled in config."
+
+        # Otherwise, just check if THIS specific candle has already been traded
+        # This prevents opening multiple trades for the exact same 5-minute bar.
+        if positions: # Re-check positions after potential early exit
             for pos in positions:
                 pos_time = pd.to_datetime(pos.time, unit='s')
                 current_candle_time = pd.to_datetime(candle_time)
                 if pos_time >= current_candle_time:
-                    return True
-        return False
+                    return True, f"DUPLICATE_CANDLE: Position already exists for candle {candle_time}"
+        return False, ""
 
     def check_daily_drawdown(self):
         """Checks if the daily drawdown limit has been reached."""
@@ -58,7 +67,7 @@ class MT5Bridge:
             return True
             
         try:
-            df = pd.read_csv(self.audit_log_path, parse_dates=["time"])
+            df = pd.read_csv(self.audit_log_path, parse_dates=["time"], on_bad_lines='skip')
             today = pd.Timestamp.now().normalize()
             # Check realized PnL from closed trades today
             daily_trades = df[(df["time"] >= today) & (df["status"].isin(["CLOSED_TP", "CLOSED_SL"]))]
@@ -95,7 +104,7 @@ class MT5Bridge:
             return
 
         try:
-            audit_df = pd.read_csv(self.audit_log_path, parse_dates=["time"])
+            audit_df = pd.read_csv(self.audit_log_path, parse_dates=["time"], on_bad_lines='skip')
             # Only sync trades that were EXECUTED but not yet in outcomes
             executed = audit_df[audit_df["status"] == "EXECUTED"].copy()
             
@@ -178,7 +187,13 @@ class MT5Bridge:
         self._log_to_csv(log_entry)
         
         if result.retcode != mt5.TRADE_RETCODE_DONE:
-            logger.error("❌ Order failed! Code: %s", result.retcode)
+            error_desc = {
+                10016: "INVALID_STOPS (SL/TP levels are invalid, too close, or not tick-aligned)",
+                10014: "INVALID_VOLUME (Check lot size or insufficient margin)",
+                10030: "UNSUPPORTED_FILLING_MODE (Broker requires FOK or Return)",
+                10015: "INVALID_PRICE (Market price moved too far)",
+            }.get(result.retcode, f"Error Code {result.retcode}")
+            logger.error("❌ Order failed! %s", error_desc)
             return False
         
         logger.info("✅ Trade Opened! Ticket: %s | System: %s", result.deal, metadata.get("system"))
@@ -194,11 +209,20 @@ class MT5Bridge:
             "system": metadata.get("system"),
             "regime": metadata.get("market_regime"),
             "setup": metadata.get("setup"),
+            "behavior_label": metadata.get("behavior_label"),
+            "structure_state": metadata.get("structure_state"),
+            "zone_type": metadata.get("current_zone"),
+            "alpha_score": metadata.get("alpha_score"),
+            "flow_score": metadata.get("flow_score"),
+            "reason_for_entry": "BLOCKED_BY_GATE",
             "is_exploratory": metadata.get("is_exploratory"),
             "lot": 0,
             "price": 0,
             "status": "BLOCKED",
+            "spread": metadata.get("spread", 0) / self.config.market.point_size, # Convert to points for logging
+            "slippage": 0,
             "retcode": reason,
+            "pnl": 0.0,
             "comment": ""
         }
         self._log_to_csv(log_entry)

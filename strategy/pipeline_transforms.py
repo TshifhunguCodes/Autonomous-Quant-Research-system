@@ -551,7 +551,7 @@ def build_trade_setups(df: pd.DataFrame, config) -> pd.DataFrame:
     out["atr_val"] = out.get("atr", pd.Series(0.1, index=out.index)).fillna(0.1)
     out["stop_distance"] = np.where(
         out["quality"] == "ELITE",  # Alpha System (Sniper)
-        out["atr_val"] * 2.2,
+        out["atr_val"] * 2.5,
         out["atr_val"] * 1.8   # Flow System (Sensor)
     )
     # Hard floor for spread protection (Institutional standard)

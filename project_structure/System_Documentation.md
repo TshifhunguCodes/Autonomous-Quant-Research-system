@@ -134,6 +134,8 @@ python main_v3.py --mode replay --replay-max-candles 1000
 ```bash
 # Stress test the strategy against random market slices
 python main_v3.py --mode replay --replay-start <timestamp> --replay-end <timestamp>
+python main_v3.py --mode live --execute --run-days 20 --poll-seconds 30 --live-lookback-days 7 --relaxed-demo-gate
+python main_v3.py --mode live --execute --run-days 20 --poll-seconds 30 --live-lookback-days 7 --relaxed-demo-gate
 ```
 
 ### Phase 4: Production
