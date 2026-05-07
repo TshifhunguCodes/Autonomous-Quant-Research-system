@@ -16,6 +16,8 @@ def _get_session_label(hour):
 
 def _build_alpha_trade(row, config, equity):
     """System A: STRICT ALPHA logic"""
+    if str(row.get("signal", "NO_TRADE")) != "ALPHA":
+        return None
     hour = pd.to_datetime(row["time"]).hour
     quality = row.get("quality", "UNKNOWN")
     state = row.get("market_state", "UNKNOWN")
@@ -46,18 +48,56 @@ def _build_alpha_trade(row, config, equity):
     return trade
 
 def _build_flow_trade(row, config, equity):
-    """System B: ADAPTIVE FLOW logic - Exploratory Data Engine Only"""
-    hour = pd.to_datetime(row["time"]).hour
-    is_ny = 13 <= hour < 18
+    """System B: filtered FLOW logic."""
+    if str(row.get("signal", "NO_TRADE")) != "FLOW":
+        return None
     state = row.get("market_state", "UNKNOWN")
     quality = row.get("quality", "UNKNOWN")
     score = float(row.get("confirm_score", 0))
+    framework_score = float(row.get("institutional_trade_score", score))
+    strategy_mode = str(row.get("strategy_mode", "BOTH_ACTIVE"))
+    flow_trade_type = str(row.get("flow_trade_type", "NONE"))
+    lifecycle_state = str(row.get("lifecycle_state", "TREND_HEALTHY"))
+    breakout_quality = float(row.get("breakout_quality", 50.0))
+    trap_probability = float(row.get("trap_probability", 0.0))
+    multi_tf_alignment_score = float(row.get("multi_tf_alignment_score", 50.0))
+    htf_exhaustion = float(row.get("htf_exhaustion", 50.0))
+    htf_liquidity_alignment = int(row.get("htf_liquidity_alignment", 0))
+    continuation_strength = float(row.get("continuation_strength", 0.0))
+    fake_breakout = bool(row.get("fake_breakout", 0))
+    confirmed_reversal = bool(row.get("confirmed_reversal", 0))
+    liquidity_event = str(row.get("liquidity_event", "NONE"))
 
-    # Base Risk scaling: base lot × flow risk multiplier × 0.5 dampener
-    risk_adj = config.regime.flow_risk_multiplier * 0.5
+    if strategy_mode == "BOTH_PAUSED":
+        return None
+    if framework_score < 45:
+        return None
+    if quality not in ["HIGH", "ELITE"] and flow_trade_type == "NONE":
+        return None
+    if score < max(config.regime.flow_min_confirm_score, 45) and framework_score < 45:
+        return None
+    if fake_breakout or trap_probability >= 70:
+        return None
+    if lifecycle_state in ["TREND_EXHAUSTING", "REVERSAL_WATCH"]:
+        return None
+    if htf_exhaustion >= 60 or htf_liquidity_alignment < 0:
+        return None
+    if multi_tf_alignment_score < 65:
+        return None
+    if state == "BREAKOUT" and breakout_quality < 70:
+        return None
+    if state == "REVERSAL" and not confirmed_reversal:
+        return None
+    if state in ["TREND_UP", "TREND_DOWN"] and continuation_strength < 72:
+        return None
+    if liquidity_event in ["BREAKOUT_REJECTION", "TRAP_BREAKOUT", "STOP_HUNT"]:
+        return None
+    if flow_trade_type == "EARLY_REVERSAL_ENTRY" and not bool(row.get("choch", 0)):
+        return None
+    if flow_trade_type == "EXHAUSTION_FADE" and bool(row.get("bos", 0)):
+        return None
 
-    # Flow is designed to trade in any market regime with minimal restrictions.
-    # All confirmed signals are eligible; risk is adjusted but not blocked by state.
+    risk_adj = config.regime.flow_risk_multiplier * 0.25
     trade = _build_trade_base(row, config, equity, risk_adj=risk_adj, is_exploratory=True)
     if trade:
         trade["system"] = "FLOW_EXPLORATORY"
@@ -81,6 +121,7 @@ def _build_trade_base(row, config, equity, risk_adj=1.0, is_exploratory=False):
     hour = pd.to_datetime(row["time"]).hour
     state = row.get("market_state", "UNKNOWN")
     quality = row.get("quality", "UNKNOWN")
+    flow_trade_type = str(row.get("flow_trade_type", "NONE"))
 
     if float(row.get("confirm_score", 0)) > 100: return None
 
@@ -143,6 +184,7 @@ def _build_trade_base(row, config, equity, risk_adj=1.0, is_exploratory=False):
     signal = row["confirmed_signal"]
     spread_price = float(row.get("spread", 0) or 0) * config.market.point_size
     slippage_price = config.backtest.slippage_points * config.market.point_size
+    total_cost = spread_price + slippage_price
     entry_price = float(row["entry_price"])
     stop_loss = float(row["stop_loss"])
     take_profit = float(row["take_profit"])
@@ -170,7 +212,6 @@ def _build_trade_base(row, config, equity, risk_adj=1.0, is_exploratory=False):
         return None
 
     # --- SPREAD & SLIPPAGE RESILIENCE GUARD ---
-    total_cost = spread_price + slippage_price
     cost_ratio = total_cost / risk_distance if risk_distance > 0 else 1.0
     max_allowed_cost_ratio = getattr(config.risk, 'max_cost_ratio', 0.20)
     if cost_ratio > max_allowed_cost_ratio:
@@ -215,6 +256,7 @@ def _build_trade_base(row, config, equity, risk_adj=1.0, is_exploratory=False):
         "risk_amount": risk_amount,
         "confirm_score": row.get("confirm_score", 0),
         "is_first_breakout": bool(row.get("is_first_breakout", False)),
+        "flow_trade_type": flow_trade_type,
     }
 
 def _resolve_trade(trade, candle):
@@ -487,6 +529,20 @@ def run_backtest_frame(df, config, label="full_period", mode="COMBINED"):
 
         if candidate_trade is None:
             continue
+
+        if candidate_trade.get("system") != "ALPHA":
+            flow_open = [t for t in active_trades if t.get("system") != "ALPHA"]
+            alpha_open = [t for t in active_trades if t.get("system") == "ALPHA"]
+            max_flow_open = 1 if alpha_open else int(row.get("flow_max_open_trades", 3) or 3)
+            if len(flow_open) >= max_flow_open:
+                skipped_overlap += 1
+                continue
+            if candidate_trade.get("flow_trade_type") == "EXHAUSTION_FADE" and any(t.get("flow_trade_type") == "EXHAUSTION_FADE" for t in flow_open):
+                skipped_overlap += 1
+                continue
+            if candidate_trade.get("flow_trade_type") == "MICRO_RETRACEMENT_REENTRY" and any(t.get("flow_trade_type") == "MICRO_RETRACEMENT_REENTRY" for t in flow_open):
+                skipped_overlap += 1
+                continue
 
         # Session Capping for NY Flow Trades
         hour = pd.to_datetime(current_time).hour

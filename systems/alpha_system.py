@@ -27,8 +27,18 @@ class AlphaSystem:
         out.loc[out["volatility"] == 1, "alpha_score"] -= 5
         out.loc[out["choppy"] == 1, "alpha_score"] -= 10
 
-        out["alpha_signal"] = np.where(out["alpha_score"] >= 75, "ALPHA", "")
-        out["alpha_notes"] = np.where(out["alpha_signal"] == "ALPHA", "strict_alpha", "")
+        alpha_allowed = (
+            (out["alpha_score"] >= 75)
+            & (out.get("fake_breakout", pd.Series(0, index=out.index)) == 0)
+            & (out.get("trap_probability", pd.Series(0.0, index=out.index)) < 70)
+            & (out.get("multi_tf_alignment_score", pd.Series(50.0, index=out.index)) >= 65)
+            & (out.get("htf_liquidity_alignment", pd.Series(0, index=out.index)) >= 0)
+            & (out.get("htf_exhaustion", pd.Series(50.0, index=out.index)) < 70)
+            & (~out.get("lifecycle_state", pd.Series("TREND_HEALTHY", index=out.index)).isin(["TREND_EXHAUSTING", "REVERSAL_WATCH", "FORCE_EXIT"]))
+        )
+
+        out["alpha_signal"] = np.where(alpha_allowed, "ALPHA", "")
+        out["alpha_notes"] = np.where(out["alpha_signal"] == "ALPHA", "mtf_aligned_sniper", "")
         return out
 
     def filter_high_quality(self, dataframe: pd.DataFrame) -> pd.DataFrame:

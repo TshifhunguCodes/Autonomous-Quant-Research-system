@@ -3,6 +3,7 @@ import pandas as pd
 from strategy.smc_ict_engine import SMCEngine
 from pathlib import Path
 import numpy as np
+from strategy.decision_framework import score_trade, select_strategy_mode, should_enter_counter_trend_trade
 
 logger = get_logger(__name__)
 
@@ -10,10 +11,50 @@ class ExecutionGate:
     @staticmethod
     def evaluate_signal(config, signal):
         """Validates session, regime, and system selection rules."""
-        hour = pd.to_datetime(signal["time"]).hour
+        signal_time = pd.to_datetime(signal["time"])
+        hour = signal_time.hour
         quality = signal.get("quality", "MEDIUM")
         state = signal.get("market_state", signal.get("market_regime", signal.get("behavior_label", "UNKNOWN")))
         score = signal.get("confirm_score", 0)
+        direction = signal.get("confirmed_signal", "").upper()
+        retracement_class = signal.get("retracement_class", "NON_TREND")
+        retracement_trade_allowed = bool(signal.get("retracement_trade_allowed", 1))
+        confirmed_reversal = bool(signal.get("confirmed_reversal", 0))
+        bos = bool(signal.get("bos", 0))
+        choch = bool(signal.get("choch", 0))
+        lifecycle_state = signal.get("lifecycle_state", "TREND_HEALTHY")
+        continuation_strength = float(signal.get("continuation_strength", 0.0))
+        liquidity_event = str(signal.get("liquidity_event", "NONE"))
+        liquidity_sweep = bool(signal.get("liquidity_sweep", 0))
+        fake_breakout = bool(signal.get("fake_breakout", 0))
+        breakout_quality = float(signal.get("breakout_quality", 50.0))
+        trap_probability = float(signal.get("trap_probability", 0.0))
+        stop_hunt_detected = bool(signal.get("stop_hunt_detected", 0))
+        htf_bias = str(signal.get("htf_bias", "NEUTRAL"))
+        htf_lifecycle = str(signal.get("htf_lifecycle", "UNKNOWN"))
+        htf_exhaustion = float(signal.get("htf_exhaustion", 50.0))
+        htf_liquidity_alignment = int(signal.get("htf_liquidity_alignment", 0))
+        multi_tf_alignment_score = float(signal.get("multi_tf_alignment_score", 50.0))
+        smart_stop_ok = bool(signal.get("smart_stop_ok", True))
+        price_drift_ok = bool(signal.get("price_drift_ok", True))
+        flow_trade_type = str(signal.get("flow_trade_type", "NONE"))
+        is_flow_signal = str(signal.get("signal", "")).upper() == "FLOW" or flow_trade_type != "NONE"
+        flow_counter_trend_allowed = bool(signal.get("flow_counter_trend_allowed", 0))
+        max_signal_age_seconds = (5 if is_flow_signal else 10) * 60 # Increased FLOW max_signal_age from 3 to 5 minutes
+        current_time = pd.to_datetime(signal.get("current_time", pd.Timestamp.utcnow()))
+        if current_time.tzinfo is not None and signal_time.tzinfo is None:
+            current_time = current_time.tz_localize(None)
+        elif current_time.tzinfo is None and signal_time.tzinfo is not None:
+            signal_time = signal_time.tz_localize(None)
+        signal_age_seconds = max(0.0, (current_time - signal_time).total_seconds())
+
+        # Broker Time Alignment Correction (Internal Gate)
+        if signal_age_seconds > 1800:
+            hours_offset = round(signal_age_seconds / 3600)
+            signal_age_seconds = abs(signal_age_seconds - (hours_offset * 3600))
+
+        if signal_age_seconds > max_signal_age_seconds:
+            return False, "NONE", 0, "STALE_SIGNAL_REJECTION", True
 
         if getattr(config.live, "relaxed_demo_gate", False):
             system_type = "ALPHA" if signal.get("signal") == "ALPHA" else "FLOW_EXP"
@@ -21,6 +62,34 @@ class ExecutionGate:
             lot_multiplier = 1.0 if system_type == "ALPHA" else getattr(config.regime, "flow_risk_multiplier", 0.5)
             final_lot = max(0.01, config.live.lot * lot_multiplier)
             return True, system_type, final_lot, "RELAXED_DEMO_PASS", is_exploratory
+
+        if not smart_stop_ok:
+            return False, "NONE", 0, "UNREALISTIC_STOP_REJECTION", True
+
+        if not price_drift_ok:
+            return False, "NONE", 0, "PRICE_DRIFT_REJECTION", True
+
+        strategy_mode = str(signal.get("strategy_mode", select_strategy_mode(signal)))
+        framework_score = float(signal.get("institutional_trade_score", score_trade(signal)))
+        if is_flow_signal:
+            if strategy_mode == "BOTH_PAUSED":
+                return False, "FLOW_EXP", 0, "FLOW_BOTH_PAUSED", True
+            if framework_score < 45:
+                return False, "FLOW_EXP", 0, "FLOW_SCORE_BELOW_45", True
+            if float(signal.get("spread_ratio_to_average", 1.0) or 1.0) > 2.5:
+                return False, "FLOW_EXP", 0, "FLOW_SPREAD_REGIME_BLOCK", True
+            flow_counter_trend = (
+                (state == "TREND_UP" and direction == "SELL")
+                or (state == "TREND_DOWN" and direction == "BUY")
+            )
+            if flow_counter_trend and should_enter_counter_trend_trade(signal) != "ALLOWED":
+                return False, "FLOW_EXP", 0, "FLOW_COUNTER_TREND_BLOCKED", True
+            lot_multiplier = getattr(config.regime, "flow_risk_multiplier", 0.5) * 0.5
+            if strategy_mode == "FLOW_ONLY":
+                lot_multiplier *= 0.8
+            if flow_trade_type in ["EXHAUSTION_FADE", "EARLY_REVERSAL_ENTRY"]:
+                lot_multiplier *= 0.5
+            return True, "FLOW_EXP", max(0.01, config.live.lot * lot_multiplier), "FLOW_FRAMEWORK_PASS", True
         
         # Task 4: Slippage Guard
         # Blocks if current price has moved too far from the research entry price
@@ -49,8 +118,71 @@ class ExecutionGate:
             if not has_sweep and score < 90:
                 return False, "NONE", 0, "ALPHA_SMC_NO_SWEEP_REJECTION", True
 
+        if not retracement_trade_allowed:
+            return False, "NONE", 0, "RETRACEMENT_TRADE_BLOCKED", True
+
+        if retracement_class == "REVERSAL_WARNING":
+            return False, "NONE", 0, "REVERSAL_WARNING_BLOCK", True
+
+        if fake_breakout:
+            return False, "NONE", 0, "FAKE_BREAKOUT_CONTINUATION_BLOCK", True
+
+        liquidity_rejection = liquidity_event in [
+            "BREAKOUT_REJECTION",
+            "TRAP_BREAKOUT",
+            "STOP_HUNT",
+            "CONFIRMED_SWEEP_REJECTION",
+        ]
+
+        aggressive_continuation = (
+            state in ["TREND_UP", "TREND_DOWN"]
+            and direction in ["BUY", "SELL"]
+            and continuation_strength >= 70
+        )
+        counter_trend_trade = (
+            (state == "TREND_UP" and direction == "SELL")
+            or (state == "TREND_DOWN" and direction == "BUY")
+        )
+        htf_against_direction = (
+            (direction == "BUY" and htf_bias == "BEARISH")
+            or (direction == "SELL" and htf_bias == "BULLISH")
+        )
+
+        if aggressive_continuation and breakout_quality < 60:
+            return False, "NONE", 0, "BREAKOUT_CONFIRMATION_REQUIRED", True
+
+        if aggressive_continuation and htf_exhaustion >= 70:
+            return False, "NONE", 0, "HTF_EXHAUSTION_CONTINUATION_BLOCK", True
+
+        if aggressive_continuation and htf_liquidity_alignment < 0:
+            return False, "NONE", 0, "HTF_LIQUIDITY_REJECTION_BLOCK", True
+
+        if aggressive_continuation and multi_tf_alignment_score < 60:
+            return False, "NONE", 0, "HTF_ALIGNMENT_REQUIRED", True
+
+        if aggressive_continuation and lifecycle_state not in ["TREND_HEALTHY", "BREAKOUT_EXPANSION"]:
+            return False, "NONE", 0, "AGGRESSIVE_CONTINUATION_LIFECYCLE_BLOCK", True
+
+        if lifecycle_state == "TREND_EXHAUSTING" and direction in ["BUY", "SELL"] and aggressive_continuation:
+            return False, "NONE", 0, "TREND_EXHAUSTING_CONTINUATION_BLOCK", True
+
+        if liquidity_rejection and aggressive_continuation:
+            return False, "NONE", 0, "LIQUIDITY_REJECTION_CONTINUATION_BLOCK", True
+
+        if counter_trend_trade:
+            if not flow_counter_trend_allowed and liquidity_event != "CONFIRMED_SWEEP_REJECTION" and not (liquidity_sweep and stop_hunt_detected and confirmed_reversal):
+                return False, "NONE", 0, "COUNTER_TREND_NEEDS_SWEEP_REJECTION", True
+
+        if htf_against_direction and counter_trend_trade and htf_lifecycle != "REVERSAL_WATCH":
+            return False, "NONE", 0, "HTF_STRUCTURE_CONFLICT_BLOCK", True
+
+        if lifecycle_state == "EXIT_WARNING" and aggressive_continuation:
+            return False, "NONE", 0, "EXIT_WARNING_CONTINUATION_BLOCK", True
+
+        if lifecycle_state == "FORCE_EXIT":
+            return False, "NONE", 0, "FORCE_EXIT_BLOCK", True
+
         # Premium/Discount Gate: Don't buy in Premium, Don't sell in Discount
-        direction = signal.get("confirmed_signal", "").upper()
         if (direction == "BUY" and signal.get("is_premium")) or (direction == "SELL" and signal.get("is_discount")):
             return False, "NONE", 0, "INSTITUTIONAL_PRICING_REJECTION", True
         
@@ -99,6 +231,34 @@ class ExecutionGate:
                     return False, "FLOW_EXP", 0, "NY_MICRO_STRATEGY_VIOLATION", True
                 lot_multiplier *= 0.5
 
+        alpha_regime = signal.get("market_regime", signal.get("behavior_label", "UNKNOWN"))
+        if system_type == "FLOW_EXP":
+            counter_trend_buy = alpha_regime == "TREND_DOWN" and direction == "BUY"
+            counter_trend_sell = alpha_regime == "TREND_UP" and direction == "SELL"
+            if counter_trend_buy or counter_trend_sell:
+                allowed_counter_types = ["EXHAUSTION_FADE", "EARLY_REVERSAL_ENTRY"]
+                if flow_trade_type not in allowed_counter_types and (lifecycle_state != "REVERSAL_CONFIRMED" or not (confirmed_reversal and bos and choch)):
+                    return False, system_type, 0, "FLOW_COUNTER_TREND_BLOCKED", is_exploratory
+                if flow_trade_type == "EARLY_REVERSAL_ENTRY" and not choch:
+                    return False, system_type, 0, "FLOW_EARLY_REVERSAL_NEEDS_CHOCH", is_exploratory
+                if flow_trade_type == "EXHAUSTION_FADE" and htf_exhaustion < 55 and trap_probability < 35:
+                    return False, system_type, 0, "FLOW_EXHAUSTION_NOT_EXTREME", is_exploratory
+
+        if lifecycle_state == "REVERSAL_WATCH":
+            if system_type == "FLOW_EXP":
+                lot_multiplier *= 0.5
+            else:
+                return False, system_type, 0, "REVERSAL_WATCH_STACK_REDUCTION", is_exploratory
+
+        if liquidity_rejection and system_type == "FLOW_EXP":
+            return False, system_type, 0, "LIQUIDITY_REJECTION_STACK_BLOCK", is_exploratory
+
+        if trap_probability >= 75 and aggressive_continuation:
+            return False, system_type, 0, "TRAP_PROBABILITY_BLOCK", is_exploratory
+
+        if htf_liquidity_alignment < 0 and system_type == "FLOW_EXP":
+            return False, system_type, 0, "HTF_STACKING_REJECTION", is_exploratory
+
         # 2. General Safety Filters
         if score > 100: # Elite Paradox
             return False, system_type, 0, "EXHAUSTION_CLIMAX_REJECTION", is_exploratory
@@ -117,6 +277,8 @@ class ExecutionGate:
 
         # Calculate Lot
         base_lot = config.live.lot
+        if multi_tf_alignment_score >= 80:
+            lot_multiplier *= 1.1
         final_lot = max(0.01, base_lot * lot_multiplier * perf_multiplier)
         
         return True, system_type, final_lot, "PASS", is_exploratory

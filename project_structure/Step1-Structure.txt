@@ -1,28 +1,53 @@
 ================================================================================
-AQRS V2: SYSTEM ARCHITECTURE & OPERATIONAL WORKFLOW
+AQRS V3: SYSTEM ARCHITECTURE & OPERATIONAL WORKFLOW
 ================================================================================
 
 1. DIRECTORY STRUCTURE
 --------------------------------------------------------------------------------
-quant_system/
+Autonomous-Quant-Research-system/
 ├── agents/                     # Data Acquisition & Cleaning
 │   ├── data_agent.py           # MT5 Connection & Raw Ingestion
 │   ├── cleaning_agent.py       # Validation & Chronological Correction
 │   └── feature_agent.py        # Technical Indicator Calculations (ATR, MA, etc.)
+├── backtesting/                # V3 Performance Analytics
+│   └── backtest_engine.py      # Dedicated engine for multi-system backtests
+├── config/                     # System Settings
+│   ├── app_config.json         # Main runtime config
+│   └── v3_config.py            # V3-specific engine thresholds
 ├── core/                       # System Infrastructure
 │   ├── config.py               # Paths, Risk, & Regime Dataclasses
 │   ├── logging_utils.py        # Structured Console/File Logging
-│   └── pipeline.py             # Mode Orchestration logic
+│   ├── pipeline.py             # V2 Orchestration logic
+│   └── v3_engine.py            # V3 Master Orchestrator
+├── engines/                    # V3 Intelligence Core
+│   ├── behavior_engine.py      # Market environment labeling (CHOPPY, TREND, etc.)
+│   ├── structure_engine.py     # Price action structure (BOS, CHOCH)
+│   └── zone_engine.py          # Supply/Demand & S/R mapping
+├── execution/                  # MT5 Low-level Interaction
+│   └── mt5_executor.py         # Order routing & error handling
+├── replay/                     # V3 Forensic Replay
+│   └── replay_engine.py        # High-fidelity simulation with artifact generation
+├── reporting/                  # Performance Metrics
+│   └── reporting_engine.py     # Calculation of PF, Sharpe, & Win Rates
+├── research/                   # V3 Research Pipeline
+│   └── research_engine.py      # Generates 83-column intelligence artifacts
+├── risk/                       # Capital Preservation
+│   └── risk_manager.py         # Dynamic position sizing & ATR stops
 ├── strategy/                   # The Trading Engine
-│   ├── pipeline_transforms.py  # Market State, Signals, & Confirmations
-│   ├── higher_timeframe_agent.py # H1 Bias & Context
-│   ├── backtesting.py          # Historical Simulation (Alpha & Flow Systems)
+│   ├── pipeline_transforms.py  # Feature engineering & confirmation logic
+│   ├── smc_ict_engine.py       # Smart Money Concepts (OB, FVG)
+│   ├── volume_profile_engine.py# Point of Control & Value Areas
+│   ├── signal_validation_engine.py # Institutional Math Firewall
 │   ├── execution_agent.py      # MT5 Live Guarded Orders
-│   ├── reporting.py            # Stability & Rolling Performance Reports
-│   ├── replay_engine.py        # Forensic Candle-by-Candle Simulation
-│   └── debug_engine.py         # Terminal Summaries & Quality Metrics
-├── data/                       # Storage (Raw, Research, Backtest, Replay)
-└── main.py                     # System Entrypoint
+│   ├── execution_gate.py       # Strategic filters & adaptive learning
+│   ├── mt5_bridge.py           # MT5 safety guard & drawdown checks
+│   └── streamlit_app.py        # Dashboard Frontend
+├── systems/                    # Strategy Logic
+│   ├── alpha_system.py         # Sniper logic (High-conviction)
+│   └── flow_system.py          # Sensor logic (Continuous monitoring)
+├── data/                       # Storage (raw/, research/, backtest/, live/)
+├── main.py                     # V2 Entrypoint
+└── main_v3.py                  # V3 Entrypoint & Live Runner
 
 2. OPERATIONAL EXECUTION GUIDE (ORDER OF USE)
 --------------------------------------------------------------------------------
@@ -30,51 +55,55 @@ quant_system/
 PHASE 1: DATA & RESEARCH (Preparation)
 --------------------------------------------------------------------------------
 1. Refresh Market Data:
-   python main.py --mode research --refresh-data
-   > Syncs latest M5/H1 bars from MT5 and rebuilds all technical features.
+   python main_v3.py --mode research
+   > Syncs latest bars and generates the 83-column pipeline.csv artifact.
 
-2. Logic Iteration (No Data Fetch):
-   python main.py --mode research --reuse-artifacts
-   > Re-calculates signals/setups based on current code using existing data.
+2. Validation of Pipeline Logic:
+   python test_v3_integration.py
+   > Checks that all V3 engines are communicating without errors.
 
 PHASE 2: VALIDATION (Historical Testing)
 --------------------------------------------------------------------------------
 3. Full Backtest:
-   python main.py --mode backtest --refresh-data
-   > Runs end-to-end: Data -> Features -> Strategy -> Performance Summary.
+   python main_v3.py --mode backtest --output data/backtest/v3_research_output.csv
+   > Simulates Alpha/Flow systems over historical data.
 
-4. Fast Iteration (Backtest only):
-   python main.py --mode summary --reuse-artifacts
-   > The "Tweak & Check" command. Runs only the backtester on cached signals.
+4. Institutional Readiness Check:
+   python validator_institutional.py
+   > Runs a 20-point diagnostic on backtest results for go-live approval.
 
-5. Out-of-Sample (OOS) Validation:
-   python main.py --mode backtest --in-sample-end 2024-01-01 --oos-start 2024-02-01
-   > Checks for overfitting by testing on data the strategy hasn't "seen".
+5. Walk-Forward Stability:
+   python v3_final_report.py
+   > Analyzes consistency and Win Rate degradation across regimes.
 
 PHASE 3: STRESS & FORENSICS (Robustness)
 --------------------------------------------------------------------------------
-6. Robustness Stress Test:
-   python main.py --mode stress --stress-random-runs 10 --stress-window-days 5
-   > Runs multiple random walk-forward slices to verify consistency.
+6. Forensic Replay (Debugging):
+   python main_v3.py --mode replay --replay-max-candles 1000
+   > Simulates live trading candle-by-candle for logic verification.
 
-7. Forensic Replay (Debugging):
-   python main.py --mode replay --replay-start "2024-04-01" --replay-max-candles 500
-   > Simulates live trading candle-by-candle to debug specific trade decisions.
+7. Monte Carlo Analysis:
+   Included in 'validator_institutional.py'
+   > Tests resilience against sequence reshuffling and spread spikes.
 
 PHASE 4: PRODUCTION (Live Execution)
 --------------------------------------------------------------------------------
 8. Live Signal Preview:
-   python main.py --mode live --reuse-artifacts
-   > Checks current market for signals. Will NOT place orders.
+   python main_v3.py --mode live
+   > Real-time monitoring with heartbeats. Will NOT place orders.
 
 9. Active Trading:
-   python main.py --mode live --execute-live
-   > Checks for signals and sends orders to MT5 if all safety guards pass.
+   python main_v3.py --mode live --execute
+   > Sends orders to MT5 demo if all institutional safety guards pass.
+
+10. Dashboard Monitoring:
+   python main_v3.py --mode dashboard
+   > Launches the Streamlit UI and Backend API for visual tracking.
 
 3. PRO-TIPS & UTILITIES
 --------------------------------------------------------------------------------
-* Global Override: Use '--log-level DEBUG' for deep tracing of every calculation.
-* Rolling Windows: Adjust '--rolling-window-days' to change the size of stability reports.
 * Automation: Use a shell loop for continuous live execution:
-  Powershell: while($true) { python main.py --mode live --execute-live; sleep 300 }
+  Powershell: while($true) { python main_v3.py --mode live --execute --live-lookback-days 2; sleep 10 }
+* Heartbeats: Monitor Telegram for system status and trade alerts.
+* Integrity: Always run 'validator_institutional.py' before increasing risk.
 ================================================================================

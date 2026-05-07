@@ -7,6 +7,9 @@ from agents.cleaning_agent import run as clean_data
 from agents.data_agent import run as fetch_data
 from config.v3_config import V3Config
 from engines import MarketBehaviorEngine, PriceActionStructureEngine, ZoneEngine
+from engines.liquidity_engine import LiquidityEngine
+from engines.market_lifecycle_engine import MarketLifecycleEngine
+from engines.mtf_context_engine import MTFContextEngine
 from replay.replay_engine import ReplayEngine
 from risk.risk_manager import RiskManager
 from systems import AlphaSystem, FlowSystem
@@ -20,6 +23,9 @@ class AQRSV3Engine:
         self.behavior = MarketBehaviorEngine(config)
         self.structure = PriceActionStructureEngine(config)
         self.zone = ZoneEngine(config)
+        self.lifecycle = MarketLifecycleEngine(config)
+        self.liquidity = LiquidityEngine(config)
+        self.mtf_context = MTFContextEngine(config)
         self.alpha = AlphaSystem(config)
         self.flow = FlowSystem(config)
         self.risk = RiskManager(config)
@@ -44,9 +50,13 @@ class AQRSV3Engine:
         pipeline = self.behavior.classify_market(df)
         pipeline = self.structure.build_price_action_structure(pipeline)
         pipeline = self.zone.build_zones(pipeline)
+        pipeline = self.lifecycle.classify_lifecycle(pipeline)
+        pipeline = self.liquidity.classify_liquidity(pipeline)
+        pipeline = self.mtf_context.classify_context(pipeline)
         pipeline = self.alpha.generate_alpha_setups(pipeline)
         pipeline = self.flow.generate_flow_setups(pipeline)
         pipeline = self._resolve_signals(pipeline)
+        pipeline = self._apply_mtf_confidence(pipeline)
         pipeline = self.risk.annotate_trade_risk(pipeline)
         pipeline = self._annotate_execution_compatibility(pipeline)
         return pipeline
@@ -80,6 +90,15 @@ class AQRSV3Engine:
 
         return out
 
+    def _apply_mtf_confidence(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        aligned = out.get("multi_tf_alignment_score", pd.Series(50.0, index=out.index)).fillna(50.0)
+        boost = pd.Series(0.0, index=out.index)
+        boost.loc[aligned >= 80] = 10.0
+        boost.loc[(aligned >= 65) & (aligned < 80)] = 5.0
+        out["confirm_score"] = (out["confirm_score"] + boost).clip(lower=0.0, upper=100.0)
+        return out
+
     def _annotate_execution_compatibility(self, df: pd.DataFrame) -> pd.DataFrame:
         """Add legacy execution columns expected by the live execution agent."""
         out = df.copy()
@@ -92,5 +111,6 @@ class AQRSV3Engine:
         out.loc[(out["signal"].isin(["ALPHA", "FLOW"])) & (out["direction"] == "LONG"), "confirmed_signal"] = "buy"
         out.loc[(out["signal"].isin(["ALPHA", "FLOW"])) & (out["direction"] == "SHORT"), "confirmed_signal"] = "sell"
         out["market_regime"] = out["behavior_label"]
+        out["market_state"] = out["behavior_label"]
 
         return out

@@ -102,6 +102,7 @@ class PriceActionStructureEngine:
         out.loc[out["double_bottom"] == 1, "pattern"] = "DOUBLE_BOTTOM"
         out.loc[out["break_retest"] == 1, "pattern"] = "BREAK_RETEST"
         out.loc[(out["choch"] == 1) & (out["pattern"] == "NONE"), "pattern"] = "CHOCH"
+        out = self._classify_retracement(out)
         return out
 
     def identify_pattern(self, row: pd.Series) -> str:
@@ -114,3 +115,69 @@ class PriceActionStructureEngine:
         if row.get("choch", 0) == 1:
             return "CHOCH"
         return "NONE"
+
+    def _classify_retracement(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        trend_up_mask = out["behavior_label"] == "TREND_UP"
+        trend_down_mask = out["behavior_label"] == "TREND_DOWN"
+
+        out["higher_low_holding"] = ((out["last_swing_low"] >= out["prev_swing_low"]) | out["prev_swing_low"].isna()).astype(int)
+        out["lower_high_holding"] = ((out["last_swing_high"] <= out["prev_swing_high"]) | out["prev_swing_high"].isna()).astype(int)
+
+        out["fib_anchor_start"] = np.where(trend_up_mask, out["prev_swing_low"], out["prev_swing_high"])
+        out["fib_anchor_end"] = np.where(trend_up_mask, out["prev_swing_high"], out["prev_swing_low"])
+        out["fib_range"] = (out["fib_anchor_end"] - out["fib_anchor_start"]).abs()
+
+        retracement_price = np.where(trend_up_mask, out["close"], np.where(trend_down_mask, out["close"], np.nan))
+        retracement_distance = np.where(
+            trend_up_mask,
+            out["fib_anchor_end"] - retracement_price,
+            np.where(trend_down_mask, retracement_price - out["fib_anchor_end"], np.nan),
+        )
+        out["fib_retracement_pct"] = np.where(
+            out["fib_range"] > 0,
+            (retracement_distance / out["fib_range"]).clip(lower=0.0) * 100.0,
+            np.nan,
+        )
+
+        out["reversal_warning"] = 0
+        out.loc[
+            (trend_up_mask | trend_down_mask)
+            & out["fib_retracement_pct"].gt(78.6)
+            & (out["bos"] == 0),
+            "reversal_warning",
+        ] = 1
+
+        out["confirmed_reversal"] = 0
+        out.loc[
+            trend_up_mask
+            & out["fib_retracement_pct"].gt(78.6)
+            & (out["bos_down"] == 1)
+            & (out["choch"] == 1)
+            & (out["close"] < out["last_swing_low"]),
+            "confirmed_reversal",
+        ] = 1
+        out.loc[
+            trend_down_mask
+            & out["fib_retracement_pct"].gt(78.6)
+            & (out["bos_up"] == 1)
+            & (out["choch"] == 1)
+            & (out["close"] > out["last_swing_high"]),
+            "confirmed_reversal",
+        ] = 1
+
+        out["retracement_class"] = "NON_TREND"
+        out.loc[(trend_up_mask | trend_down_mask) & out["fib_retracement_pct"].between(0.0, 38.0, inclusive="both"), "retracement_class"] = "SHALLOW_CONTINUATION"
+        out.loc[(trend_up_mask | trend_down_mask) & out["fib_retracement_pct"].gt(38.0) & out["fib_retracement_pct"].le(61.8), "retracement_class"] = "NORMAL_CONTINUATION"
+        out.loc[(trend_up_mask | trend_down_mask) & out["fib_retracement_pct"].gt(61.8) & out["fib_retracement_pct"].le(78.6), "retracement_class"] = "DEEP_CONTINUATION"
+        out.loc[(trend_up_mask | trend_down_mask) & out["reversal_warning"].eq(1), "retracement_class"] = "REVERSAL_WARNING"
+        out.loc[out["confirmed_reversal"] == 1, "retracement_class"] = "CONFIRMED_REVERSAL"
+
+        out["retracement_trade_allowed"] = 1
+        out.loc[out["retracement_class"] == "REVERSAL_WARNING", "retracement_trade_allowed"] = 0
+        out.loc[
+            (trend_up_mask & (out["retracement_class"] == "DEEP_CONTINUATION") & (out["higher_low_holding"] == 0))
+            | (trend_down_mask & (out["retracement_class"] == "DEEP_CONTINUATION") & (out["lower_high_holding"] == 0)),
+            "retracement_trade_allowed",
+        ] = 0
+        return out

@@ -81,26 +81,6 @@ def get_trades(mode: str = "LIVE", replay_index: int = 0):
 def get_performance(mode: str = "LIVE", replay_index: int = 0):
     return _clean_for_json(state_manager.get_performance_stats(mode=mode, replay_index=replay_index))
 
-@app.get("/signals")
-def get_signals(mode: str = "LIVE", replay_index: int = 0):
-    # Returns latest 50 setups for the signal feed
-    try:
-        if mode == "LIVE":
-            df = pd.read_csv(state_manager.setup_path, low_memory=False).tail(50)
-        elif mode == "REPLAY" and not state_manager.replay_data.get("decisions", pd.DataFrame()).empty:
-            df = state_manager.replay_data["decisions"]
-            if replay_index < len(df):
-                df = df.iloc[:replay_index + 1].tail(50)
-            else: # Replay finished
-                df = df.tail(50)
-        else:
-            return []
-
-        return _clean_for_json(df.to_dict(orient="records"))
-    except Exception as e:
-        logger.error(f"Error getting signals: {e}")
-        return []
-
 @app.get("/chart_data")
 def get_chart_data(mode: str = "LIVE", replay_index: int = 0, num_candles: int = 100):
     df = state_manager.get_chart_data(mode=mode, replay_index=replay_index, num_candles=num_candles)
@@ -157,11 +137,12 @@ def replay_control(action: str, start_date: str = None, end_date: str = None, in
         if replay_generation_process.poll() is None: # Process is still running
             return {"status": "in_progress"}
         else: # Process has finished
-            logger.info("Replay generation process finished. Return code: %s", replay_generation_process.returncode)
-            if replay_generation_process.returncode != 0:
-                logger.error("Replay generation failed with return code %s", replay_generation_process.returncode)
+            returncode = replay_generation_process.returncode
+            logger.info("Replay generation process finished. Return code: %s", returncode)
+            if returncode != 0:
+                logger.error("Replay generation failed with return code %s", returncode)
                 replay_generation_process = None
-                return {"status": "failed", "returncode": replay_generation_process.returncode}
+                return {"status": "failed", "returncode": returncode}
             
             # Attempt to load data after generation
             success = state_manager._load_replay_data(replay_state["start_date"], replay_state["end_date"])

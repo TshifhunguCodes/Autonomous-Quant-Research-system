@@ -12,6 +12,9 @@ from config.v3_config import V3Config
 from core.config import load_config
 from core.v3_engine import AQRSV3Engine
 from strategy import execution_agent
+from core.logging_utils import get_logger
+
+logger = get_logger(__name__)
 import validator_institutional
 
 
@@ -62,16 +65,11 @@ def write_output(df, output_path):
 
 
 def load_live_m5_from_mt5(config, lookback_days):
-    if not mt5.initialize():
-        raise RuntimeError("MT5 initialization failed")
-
-    try:
-        symbol = resolve_symbol(config.market.symbol)
-        end_utc = datetime.now(timezone.utc)
-        start_utc = end_utc - timedelta(days=lookback_days)
-        df = get_data_range(symbol, mt5.TIMEFRAME_M5, start_utc, end_utc)
-    finally:
-        mt5.shutdown()
+    # Persistent connection assumed; initialization handled in run_live_mode
+    symbol = resolve_symbol(config.market.symbol)
+    end_utc = datetime.now(timezone.utc)
+    start_utc = end_utc - timedelta(days=lookback_days)
+    df = get_data_range(symbol, mt5.TIMEFRAME_M5, start_utc, end_utc)
 
     if "tick_volume" in df.columns and "volume" not in df.columns:
         df["volume"] = df["tick_volume"]
@@ -122,6 +120,11 @@ def run_live_mode(args, config, engine):
     print(f"AQRS V3: Entering continuous LIVE monitoring for {config.market.symbol}")
     print("Press Ctrl+C to stop the system.")
     print(f"Polling every {args.poll_seconds}s with a {args.live_lookback_days}-day rolling MT5 lookback.")
+    
+    if not mt5.initialize():
+        logger.critical("Failed to initialize MT5 for live mode.")
+        return
+
     if args.relaxed_demo_gate:
         object.__setattr__(config.live, "relaxed_demo_gate", True)
         print("[DEMO] Relaxed execution gate enabled for live observation.")
@@ -138,8 +141,15 @@ def run_live_mode(args, config, engine):
                 print(f"Live observation window complete after {args.run_days} day(s).")
                 break
 
+            start_load_time = time.time()
             live_m5 = load_live_m5_from_mt5(config, args.live_lookback_days)
+            load_duration = time.time() - start_load_time
+            logger.info(f"MT5 data loaded in {load_duration:.2f}s ({len(live_m5)} candles).")
+
+            start_research_time = time.time()
             latest_pipeline = engine.run_research(df=live_m5)
+            research_duration = time.time() - start_research_time
+            logger.info(f"Research pipeline processed in {research_duration:.2f}s.")
             live_trade_setups_path = get_trade_setups_path(config)
             write_output(latest_pipeline, live_trade_setups_path)
 
@@ -200,7 +210,8 @@ def run_live_mode(args, config, engine):
                     ]
                 ].to_string()
             )
-            execution_agent.run(config, execute=args.execute)
+            # Optimization: Pass the latest row directly to avoid redundant disk reads
+            execution_agent.run(config, execute=args.execute, signal_data=latest_row.to_dict())
             last_processed_candle = current_candle_time
 
             cycle_count += 1
@@ -216,10 +227,19 @@ def run_live_mode(args, config, engine):
 
         except KeyboardInterrupt:
             print("\nSystem stopped by user.")
+            mt5.shutdown()
             break
         except Exception as e:
             print(f"[ERROR] Live Cycle Error: {e}")
+            # Don't shutdown MT5 on error - try to recover
+            logger.error("Attempting to recover MT5 connection...")
+            try:
+                if not mt5.initialize():
+                    logger.error("Failed to reinitialize MT5")
+            except:
+                pass
             time.sleep(10)
+            continue
 
 
 def run_readiness_check(config, engine):

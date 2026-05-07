@@ -15,9 +15,9 @@ def get_csv_tail(path: Path, n: int = 1) -> pd.DataFrame:
         # Count lines without loading full dataframe columns/data
         with open(path, 'r', encoding='utf-8', errors='ignore') as f:
             count = sum(1 for _ in f)
-        return pd.read_csv(path, skiprows=range(1, max(1, count - n)))
-    except:
-        return pd.read_csv(path).tail(n) # Fallback
+        return pd.read_csv(path, skiprows=range(1, max(1, count - n)), on_bad_lines="skip")
+    except Exception:
+        return pd.read_csv(path, on_bad_lines="skip").tail(n) # Fallback
 
 class DashboardStateManager:
     def __init__(self, config_path=None):
@@ -28,7 +28,8 @@ class DashboardStateManager:
         
         self.audit_path = backtest_dir.parent / "live" / "execution_audit.csv"
         self.outcomes_path = backtest_dir.parent / "live" / "trade_outcomes.csv"
-        self.setup_path = _path = self.config.paths.replay_events
+        self.setup_path = self.config.paths.trade_setups
+        self.replay_decisions_path = self.config.paths.replay_decisions
         self.backtest_summary_path = self.config.paths.backtest_summary
         self.clean_m5_path = self.config.paths.clean_m5
         
@@ -232,7 +233,7 @@ class DashboardStateManager:
         history = pd.DataFrame()
         if mode == "LIVE" and self.audit_path.exists():
             try:
-                history = pd.read_csv(self.audit_path).tail(50)
+                history = pd.read_csv(self.audit_path, on_bad_lines="skip").tail(50)
                 if not history.empty:
                     history = self._clean_dataframe_for_json(history)
             except Exception as e:
@@ -423,7 +424,14 @@ class DashboardStateManager:
                 "FLOW_EXP": {"pnl": 0, "trades": 0, "wins": 0, "losses": 0, "blocked": 0, "last_status": "N/A"}
             }
 
-        df = pd.read_csv(self.audit_path, low_memory=False)
+        try:
+            df = pd.read_csv(self.audit_path, low_memory=False, on_bad_lines="skip")
+        except Exception as e:
+            logger.error("Error reading LIVE audit performance data: %s", e)
+            return {
+                "ALPHA": {"pnl": 0, "trades": 0, "wins": 0, "losses": 0, "blocked": 0, "last_status": "AUDIT_READ_ERROR"},
+                "FLOW_EXP": {"pnl": 0, "trades": 0, "wins": 0, "losses": 0, "blocked": 0, "last_status": "AUDIT_READ_ERROR"},
+            }
         executed = df[df["status"] == "EXECUTED"].copy() if "status" in df.columns else pd.DataFrame()
         
         stats = {}
@@ -469,7 +477,7 @@ class DashboardStateManager:
             if self.replay_trades.empty: return None
             df = self.replay_trades[(self.replay_trades['exit_time'] <= current_time) & (self.replay_trades['result'] != "OPEN")].copy()
         elif self.outcomes_path.exists():
-            df = pd.read_csv(self.outcomes_path)
+            df = pd.read_csv(self.outcomes_path, on_bad_lines="skip")
         else:
             return None
 

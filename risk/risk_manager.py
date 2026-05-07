@@ -34,6 +34,9 @@ class RiskManager:
 
         out["direction"] = "LONG"
         out.loc[out["behavior_label"] == "TREND_DOWN", "direction"] = "SHORT"
+        flow_direction = out.get("flow_direction", pd.Series("", index=out.index)).fillna("")
+        flow_direction_mask = (out["signal"] == "FLOW") & flow_direction.isin(["LONG", "SHORT"])
+        out.loc[flow_direction_mask, "direction"] = flow_direction[flow_direction_mask]
 
         out["entry_price"] = out["close"]
         out["stop_loss"] = np.where(
