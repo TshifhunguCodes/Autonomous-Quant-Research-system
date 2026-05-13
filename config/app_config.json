@@ -6,6 +6,20 @@
     "h1_bars": 2000,
     "history_years": 2.0
   },
+  "flow_daily_limit": 6,
+  "dynamic_spread_thresholds": {
+    "low_volatility_atr": 15,
+    "high_volatility_atr": 25,
+    "low_vol_max_spread_ratio": 0.3,
+    "medium_vol_max_spread_ratio": 0.4,
+    "high_vol_max_spread_ratio": 0.5,
+    "trend_strength_override_multiplier": 1.5
+  },
+  "flexible_session_hours": {
+    "opportunity_window_minutes": 30,
+    "off_hours_score_penalty": 5,
+    "ny_session_min_score": 75
+  },
   "zones": {
     "near_threshold": 3.0,
     "major_threshold": 5.0

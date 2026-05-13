@@ -30,7 +30,9 @@ class TradeLifecycleManager:
         rr_ratio = float(getattr(config.risk, "rr_ratio", 2.0))
         lifecycle_state = str(signal.get("lifecycle_state", "TREND_HEALTHY"))
 
-        atr_multiplier = 2.2 if signal_name == "ALPHA" else 1.8
+        # Wider ATR multipliers to avoid invalid stops (error 10016)
+        # ALPHA: 2.8x ATR, FLOW: 2.2x ATR - more breathing room
+        atr_multiplier = 2.8 if signal_name == "ALPHA" else 2.2
         atr_stop = atr_value * atr_multiplier if atr_value > 0 else 0.0
 
         candle_low = float(signal.get("low", live_price))
@@ -56,10 +58,11 @@ class TradeLifecycleManager:
 
         volatility_buffer = 1.0
         if lifecycle_state in ["BREAKOUT_EXPANSION", "TREND_EXHAUSTING"] or bool(signal.get("volatility", 0)):
-            volatility_buffer = 1.25
+            volatility_buffer = 1.35  # Slightly higher for volatile conditions
 
-        floor_distance = max(atr_stop, spread * 3.0, wick_noise * 1.1, 8.0) * volatility_buffer
-        structure_buffer = max(spread * 2.0, atr_value * 0.25 if atr_value > 0 else 2.0)
+        # Wider floor distance - minimum 12 points instead of 8, better spread coverage
+        floor_distance = max(atr_stop, spread * 3.5, wick_noise * 1.2, 12.0) * volatility_buffer
+        structure_buffer = max(spread * 2.5, atr_value * 0.35 if atr_value > 0 else 3.0)
 
         if signal_type == "buy":
             structural_stop = structural_anchor - structure_buffer

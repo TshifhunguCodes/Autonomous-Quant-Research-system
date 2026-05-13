@@ -4,6 +4,8 @@ from strategy.smc_ict_engine import SMCEngine
 from pathlib import Path
 import numpy as np
 from strategy.decision_framework import score_trade, select_strategy_mode, should_enter_counter_trend_trade
+from strategy.flow_daily_tracker import get_flow_tracker
+from smart_monitor import get_smart_monitor
 
 logger = get_logger(__name__)
 
@@ -72,24 +74,104 @@ class ExecutionGate:
         strategy_mode = str(signal.get("strategy_mode", select_strategy_mode(signal)))
         framework_score = float(signal.get("institutional_trade_score", score_trade(signal)))
         if is_flow_signal:
+            # Check FLOW daily limit first
+            flow_tracker = get_flow_tracker()
+            if flow_tracker.is_limit_reached():
+                return False, "FLOW_EXP", 0, "FLOW_DAILY_LIMIT_REACHED (6 max/day)", True
+            
             if strategy_mode == "BOTH_PAUSED":
                 return False, "FLOW_EXP", 0, "FLOW_BOTH_PAUSED", True
-            if framework_score < 45:
-                return False, "FLOW_EXP", 0, "FLOW_SCORE_BELOW_45", True
-            if float(signal.get("spread_ratio_to_average", 1.0) or 1.0) > 2.5:
+            
+            # Use Smart Monitor for comprehensive evaluation
+            smart_monitor = get_smart_monitor()
+            smart_allow, smart_quality, smart_lot_mult, smart_reason, smart_tier = \
+                smart_monitor.evaluate_signal(signal, "FLOW_EXP")
+            
+            # Store smart monitor results in signal for logging
+            signal['smart_quality_score'] = smart_quality
+            signal['smart_quality_tier'] = smart_tier
+            signal['smart_lot_multiplier'] = smart_lot_mult
+            signal['smart_monitor_reason'] = smart_reason
+            
+            # If smart monitor blocks the trade, respect it
+            if not smart_allow:
+                return False, "FLOW_EXP", 0, f"SMART_MONITOR_BLOCK: {smart_reason}", True
+            
+            # Enhanced minimum score for FLOW (55 instead of 45)
+            if framework_score < 55:
+                return False, "FLOW_EXP", 0, "FLOW_SCORE_BELOW_55", True
+            
+            # Flexible spread check for FLOW
+            if float(signal.get("spread_ratio_to_average", 1.0) or 1.0) > 3.0:
                 return False, "FLOW_EXP", 0, "FLOW_SPREAD_REGIME_BLOCK", True
+            
+            # Trend alignment requirement for FLOW
+            flow_direction = direction
+            h1_bias = str(signal.get("htf_bias", "NEUTRAL"))
+            if h1_bias != "NEUTRAL":
+                h1_bullish = h1_bias == "BULLISH"
+                if flow_direction == "BUY" and not h1_bullish:
+                    return False, "FLOW_EXP", 0, "FLOW_H1_MISALIGNMENT", True
+                if flow_direction == "SELL" and h1_bullish:
+                    return False, "FLOW_EXP", 0, "FLOW_H1_MISALIGNMENT", True
+            
+            # Momentum confirmation (RSI filter)
+            rsi = float(signal.get("rsi14", 50.0))
+            if flow_direction == "BUY" and rsi < 40:
+                return False, "FLOW_EXP", 0, "FLOW_RSI_TOO_WEAK_BUY", True
+            if flow_direction == "SELL" and rsi > 60:
+                return False, "FLOW_EXP", 0, "FLOW_RSI_TOO_WEAK_SELL", True
+            
+            # Volume confirmation
+            volume_avg = float(signal.get("volume_avg_20", 1.0) or 1.0)
+            current_volume = float(signal.get("volume", 1.0) or 1.0)
+            if volume_avg > 0 and current_volume < volume_avg * 0.7:
+                return False, "FLOW_EXP", 0, "FLOW_VOLUME_TOO_LOW", True
+            
+            # Priority scoring for quality filtering
+            trend_alignment = 1.0 if (
+                (state == "TREND_UP" and flow_direction == "BUY") or 
+                (state == "TREND_DOWN" and flow_direction == "SELL")
+            ) else 0.0
+            
+            momentum_score = min(100, max(0, 100 - abs(rsi - 50) * 2))
+            volume_score = min(100, (current_volume / volume_avg) * 100) if volume_avg > 0 else 50
+            
+            priority_score = (
+                framework_score * 0.4 + 
+                trend_alignment * 100 * 0.3 + 
+                momentum_score * 0.2 + 
+                volume_score * 0.1
+            )
+            
+            # Dynamic threshold based on remaining daily trades
+            remaining = flow_tracker.get_remaining_trades()
+            if remaining <= 1:
+                min_priority = 75  # Very selective when near limit
+            elif remaining <= 3:
+                min_priority = 65  # Moderately selective
+            else:
+                min_priority = 55  # Standard threshold
+            
+            if priority_score < min_priority:
+                return False, "FLOW_EXP", 0, f"FLOW_PRIORITY_SCORE_LOW ({priority_score:.0f} < {min_priority})", True
             flow_counter_trend = (
                 (state == "TREND_UP" and direction == "SELL")
                 or (state == "TREND_DOWN" and direction == "BUY")
             )
             if flow_counter_trend and should_enter_counter_trend_trade(signal) != "ALLOWED":
                 return False, "FLOW_EXP", 0, "FLOW_COUNTER_TREND_BLOCKED", True
+            # Apply smart monitor lot multiplier
             lot_multiplier = getattr(config.regime, "flow_risk_multiplier", 0.5) * 0.5
             if strategy_mode == "FLOW_ONLY":
                 lot_multiplier *= 0.8
             if flow_trade_type in ["EXHAUSTION_FADE", "EARLY_REVERSAL_ENTRY"]:
                 lot_multiplier *= 0.5
-            return True, "FLOW_EXP", max(0.01, config.live.lot * lot_multiplier), "FLOW_FRAMEWORK_PASS", True
+            
+            # Apply smart monitor's quality-based lot adjustment
+            lot_multiplier *= smart_lot_mult
+            
+            return True, "FLOW_EXP", max(0.01, config.live.lot * lot_multiplier), f"FLOW_FRAMEWORK_PASS ({smart_reason})", True
         
         # Task 4: Slippage Guard
         # Blocks if current price has moved too far from the research entry price
@@ -191,12 +273,26 @@ class ExecutionGate:
             if not (signal.get("volume_spike", False) and signal.get("near_prev_poc", False)):
                 return False, "NONE", 0, "SMC_NO_VOLUME_SPIKE_AT_POC_REJECTION", True
 
-        # Task 4: Cost Efficiency Gate (Spread Filter)
-        # If current spread is > 40% of our Stop Distance, the trade is mathematically 
-        # sub-optimal before it even starts.
+        # Task 4: Dynamic Cost Efficiency Gate (Flexible Spread Filter)
+        # Uses ATR-based dynamic thresholds instead of fixed ratios
         stop_dist = float(signal.get("stop_distance", 1.0))
         current_spread = float(signal.get("spread", 0))
-        if stop_dist > 0 and (current_spread / stop_dist) > 0.4:
+        atr_value = float(signal.get("atr14", 15.0))
+        continuation_strength = float(signal.get("continuation_strength", 0.0))
+        
+        # Dynamic spread ratio based on volatility
+        if atr_value > 25:
+            max_spread_ratio = 0.5  # High volatility - allow wider spreads
+        elif atr_value > 15:
+            max_spread_ratio = 0.4  # Medium volatility
+        else:
+            max_spread_ratio = 0.3  # Low volatility - tighter spreads
+        
+        # Trend strength override - allow wider spreads for strong trends
+        if continuation_strength >= 80:
+            max_spread_ratio *= 1.5
+        
+        if stop_dist > 0 and (current_spread / stop_dist) > max_spread_ratio:
             return False, "NONE", 0, "COST_TO_REWARD_REJECTION", True
         
         # Task 3 & 4: Adaptive Intelligence Logic
@@ -204,16 +300,21 @@ class ExecutionGate:
         if perf_multiplier == 0:
             return False, "NONE", 0, "NEGATIVE_EXPECTANCY_ADAPTIVE_BLOCK", True
 
-        # 1. System Selection logic
+        # 1. System Selection logic with flexible session handling
+        # Flexible NY session - increase score requirements instead of hard blocking
+        ny_session_active = 13 <= hour < 18
+        ny_session_min_score = 75 if ny_session_active else 0
+        
         alpha_eligible = (
             quality == "ELITE" and 
             hour in config.regime.alpha_session_hours and 
             state not in ["CHOPPY", "VOLATILE"] and
-            not (13 <= hour < 18)  # NY Hard Block
+            score >= ny_session_min_score  # Flexible NY handling
         )
         
-        # Trend conviction floor for Alpha
-        if alpha_eligible and state == "TRENDING" and score < 85:
+        # Trend conviction floor for Alpha (also flexible during NY)
+        min_trend_score = 85 if not ny_session_active else 80
+        if alpha_eligible and state == "TRENDING" and score < min_trend_score:
             alpha_eligible = False
             
         if alpha_eligible:
