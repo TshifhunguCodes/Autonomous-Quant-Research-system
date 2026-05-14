@@ -9,5 +9,7 @@ logger = get_logger(__name__)
 
 def run(config):
     df = pd.read_csv(config.paths.clean_m5, parse_dates=["time"])
+    # Ensure consistent datetime precision
+    df["time"] = df["time"].astype("datetime64[s]")
     build_m5_features(df).to_csv(config.paths.m5_features, index=False)
     logger.info("M5 feature set saved at %s", config.paths.m5_features)

@@ -181,6 +181,9 @@ def run_live_mode(args, config, engine):
                 continue
 
             live_setups_df = pd.read_csv(live_trade_setups_path, parse_dates=["time"], low_memory=False)
+            # Ensure consistent datetime precision
+            if "time" in live_setups_df.columns:
+                live_setups_df["time"] = live_setups_df["time"].astype("datetime64[s]")
             if live_setups_df.empty:
                 time.sleep(10)
                 continue
@@ -213,6 +216,15 @@ def run_live_mode(args, config, engine):
             # Optimization: Pass the latest row directly to avoid redundant disk reads
             execution_agent.run(config, execute=args.execute, signal_data=latest_row.to_dict())
             last_processed_candle = current_candle_time
+
+            # ===== AUTO-RETRAIN ML MODELS =====
+            try:
+                retrain_result = engine.retrain_pipeline.check_and_retrain(latest_pipeline)
+                if retrain_result.get("retrained"):
+                    logger.info(f"🤖 ML models auto-retrained: {retrain_result.get('total_retrains')} total retrains")
+            except Exception as e:
+                logger.warning(f"Auto-retrain check failed (non-blocking): {e}")
+            # ===================================
 
             cycle_count += 1
             if cycle_count >= 120:

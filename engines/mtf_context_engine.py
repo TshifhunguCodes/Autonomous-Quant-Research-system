@@ -14,6 +14,8 @@ class MTFContextEngine:
 
     def classify_context(self, df: pd.DataFrame) -> pd.DataFrame:
         out = df.copy()
+        # Ensure consistent datetime precision
+        out["time"] = out["time"].astype("datetime64[s]")
         if "direction" not in out.columns:
             out["direction"] = "NEUTRAL"
             out.loc[out["behavior_label"].eq("TREND_UP"), "direction"] = "LONG"
@@ -88,6 +90,8 @@ class MTFContextEngine:
         if not source.exists():
             return pd.DataFrame()
         h1 = pd.read_csv(source, parse_dates=["time"])
+        # Ensure consistent datetime precision
+        h1["time"] = h1["time"].astype("datetime64[s]")
         return h1.sort_values("time").reset_index(drop=True)
 
     def _build_h1_context(self, h1: pd.DataFrame) -> pd.DataFrame:
@@ -171,6 +175,8 @@ class MTFContextEngine:
                 "close": "last",
             }
         ).dropna().reset_index()
+        # Ensure consistent datetime precision after resample
+        h4["time"] = h4["time"].astype("datetime64[s]")
         if h4.empty:
             return pd.DataFrame(columns=["time", "h4_exhaustion", "h4_reversal_risk", "h1_bos_bias_match"])
 

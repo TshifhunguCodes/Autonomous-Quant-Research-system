@@ -8,6 +8,8 @@ logger = get_logger(__name__)
 
 def clean_file(path_in, path_out):
     df = pd.read_csv(path_in, parse_dates=["time"])
+    # Ensure consistent datetime precision
+    df["time"] = df["time"].astype("datetime64[s]")
     df = df.drop_duplicates()
     df = df.dropna()
     df = df.sort_values("time").reset_index(drop=True)

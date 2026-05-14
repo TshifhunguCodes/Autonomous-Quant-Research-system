@@ -13,7 +13,7 @@ class PriceActionStructureEngine:
 
     def build_price_action_structure(self, df: pd.DataFrame) -> pd.DataFrame:
         out = df.copy()
-        out["time"] = pd.to_datetime(out["time"])
+        out["time"] = pd.to_datetime(out["time"]).astype("datetime64[s]")
         out = out.sort_values("time").reset_index(drop=True)
 
         out["swing_high"] = (

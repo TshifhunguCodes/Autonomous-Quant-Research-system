@@ -10,6 +10,26 @@ from smart_monitor import get_smart_monitor
 logger = get_logger(__name__)
 
 class ExecutionGate:
+    # Lazy-loaded adaptive filter (initialized once)
+    _adaptive_filter = None
+    
+    @classmethod
+    def _get_adaptive_filter(cls):
+        """Get or create the AdaptiveFilter singleton."""
+        if cls._adaptive_filter is None:
+            from intelligence.adaptive_filter import AdaptiveFilter
+            cls._adaptive_filter = AdaptiveFilter()
+        return cls._adaptive_filter
+    
+    @classmethod
+    def record_trade_outcome(cls, signal: dict, pnl: float):
+        """Record trade outcome to adaptive filter for learning."""
+        try:
+            adapter = cls._get_adaptive_filter()
+            adapter.record_outcome(signal, pnl)
+        except Exception as e:
+            logger.warning(f"Adaptive filter record_outcome error: {e}")
+    
     @staticmethod
     def evaluate_signal(config, signal):
         """Validates session, regime, and system selection rules."""
@@ -57,6 +77,15 @@ class ExecutionGate:
 
         if signal_age_seconds > max_signal_age_seconds:
             return False, "NONE", 0, "STALE_SIGNAL_REJECTION", True
+
+        # ===== ADAPTIVE FILTER (ML Layer) =====
+        try:
+            filter_result = ExecutionGate._get_adaptive_filter().evaluate_signal(signal)
+            if not filter_result["allowed"]:
+                return False, "NONE", 0, f"ADAPTIVE_FILTER:{filter_result['reason']}", True
+        except Exception as e:
+            logger.warning(f"Adaptive filter error (non-blocking): {e}")
+        # =====================================
 
         if getattr(config.live, "relaxed_demo_gate", False):
             system_type = "ALPHA" if signal.get("signal") == "ALPHA" else "FLOW_EXP"

@@ -48,7 +48,7 @@ class MarketBehaviorEngine:
 
     def _build_features(self, df: pd.DataFrame) -> pd.DataFrame:
         out = df.copy()
-        out["time"] = pd.to_datetime(out["time"])
+        out["time"] = pd.to_datetime(out["time"]).astype("datetime64[s]")
         out = out.sort_values("time").reset_index(drop=True)
         out["prev_close"] = out["close"].shift(1)
         out["momentum"] = out["close"] - out["prev_close"]

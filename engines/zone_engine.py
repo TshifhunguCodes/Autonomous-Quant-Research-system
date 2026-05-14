@@ -13,7 +13,7 @@ class ZoneEngine:
 
     def build_zones(self, df: pd.DataFrame) -> pd.DataFrame:
         out = df.copy()
-        out["time"] = pd.to_datetime(out["time"])
+        out["time"] = pd.to_datetime(out["time"]).astype("datetime64[s]")
         out = out.sort_values("time").reset_index(drop=True)
 
         out["date"] = out["time"].dt.date

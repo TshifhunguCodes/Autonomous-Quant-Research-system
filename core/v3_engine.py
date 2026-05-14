@@ -14,6 +14,12 @@ from replay.replay_engine import ReplayEngine
 from risk.risk_manager import RiskManager
 from systems import AlphaSystem, FlowSystem
 
+# NEW: Intelligence + Indicators + Pattern Detection
+from intelligence.pattern_detector import PatternDetector
+from strategy.indicators import IndicatorEngine
+from intelligence.unsupervised_model import UnsupervisedRegimeDetector
+from intelligence.retrain_pipeline import RetrainPipeline
+
 
 class AQRSV3Engine:
     """AQRS V3 orchestrator for research, replay, and live execution."""
@@ -30,6 +36,12 @@ class AQRSV3Engine:
         self.flow = FlowSystem(config)
         self.risk = RiskManager(config)
         self.replay = ReplayEngine(config)
+        
+        # NEW: Additional feature engines
+        self.pattern_detector = PatternDetector(config)
+        self.indicator_engine = IndicatorEngine(config)
+        self.regime_detector = UnsupervisedRegimeDetector(config)
+        self.retrain_pipeline = RetrainPipeline(config)
 
     def _load_data(self, custom_path: str | None = None) -> pd.DataFrame:
         """Loads historical data, defaulting to config paths if no custom path is provided."""
@@ -39,6 +51,8 @@ class AQRSV3Engine:
         if not source.exists():
             raise FileNotFoundError(f"V3 Engine Error: Could not locate historical data at {source}")
         df = pd.read_csv(source, parse_dates=["time"])
+        # Ensure consistent datetime precision
+        df["time"] = df["time"].astype("datetime64[s]")
         return df
 
     def run_research(self, df: pd.DataFrame | None = None, refresh_data: bool = False) -> pd.DataFrame:
@@ -52,6 +66,16 @@ class AQRSV3Engine:
         pipeline = self.zone.build_zones(pipeline)
         pipeline = self.lifecycle.classify_lifecycle(pipeline)
         pipeline = self.liquidity.classify_liquidity(pipeline)
+        
+        # === NEW: ATS_US30_NAS features added here ===
+        # 1. Additional indicators (MACD, Bollinger Bands, ADX, Stochastic)
+        pipeline = self.indicator_engine.enrich_pipeline(pipeline)
+        # 2. Candlestick pattern detection (hammer, engulfing, etc.)
+        pipeline = self.pattern_detector.enrich_pipeline(pipeline)
+        # 3. K-Means unsupervised regime detection
+        pipeline = self.regime_detector.enrich_pipeline(pipeline)
+        # =============================================
+        
         pipeline = self.mtf_context.classify_context(pipeline)
         pipeline = self.alpha.generate_alpha_setups(pipeline)
         pipeline = self.flow.generate_flow_setups(pipeline)

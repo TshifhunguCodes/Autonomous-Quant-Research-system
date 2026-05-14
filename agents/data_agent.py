@@ -164,7 +164,10 @@ def get_data_range_chunked(symbol, timeframe, start_utc, end_utc, chunk_days):
 def merge_existing_data(path, df_new):
     frames = [df_new]
     if path.exists():
-        frames.append(pd.read_csv(path, parse_dates=["time"]))
+        df_existing = pd.read_csv(path, parse_dates=["time"])
+        # Ensure datetime precision matches
+        df_existing["time"] = df_existing["time"].astype("datetime64[s]")
+        frames.append(df_existing)
 
     merged = (
         pd.concat(frames, ignore_index=True)
@@ -172,6 +175,8 @@ def merge_existing_data(path, df_new):
         .sort_values("time")
         .reset_index(drop=True)
     )
+    # Ensure consistent datetime precision before saving
+    merged["time"] = merged["time"].astype("datetime64[s]")
     merged.to_csv(path, index=False)
     return merged
 

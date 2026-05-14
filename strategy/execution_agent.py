@@ -15,7 +15,27 @@ from strategy.execution_gate import ExecutionGate
 from strategy.mt5_bridge import MT5Bridge
 from strategy.trade_lifecycle_manager import TradeLifecycleManager
 
+# NEW IMPORTS: Trailing Stops + Session Filter
+from strategy.trailing_stop import TrailingStopManager
+from strategy.session_filter import SessionFilter
+
 logger = get_logger(__name__)
+
+# Global instances for trailing stops and session filter
+_trailing_stop_manager = None
+_session_filter = None
+
+def get_trailing_stop_manager(config=None):
+    global _trailing_stop_manager
+    if _trailing_stop_manager is None:
+        _trailing_stop_manager = TrailingStopManager(config)
+    return _trailing_stop_manager
+
+def get_session_filter(config=None):
+    global _session_filter
+    if _session_filter is None:
+        _session_filter = SessionFilter(config)
+    return _session_filter
 
 
 def test_telegram_connection(config):
@@ -76,6 +96,16 @@ def run(config, execute: bool = False, live_tick=None, signal_data=None):
     if not symbol_info or tick is None:
         logger.error("Failed to get market data for %s", symbol)
         return
+
+    # ===== SESSION FILTER (Weekend + News Guard) =====
+    last_signal_dict = dict(last_signal)
+    last_signal_dict["current_time"] = pd.to_datetime(tick.time, unit="s")
+    session_filter = get_session_filter(config)
+    session_check = session_filter.filter_signal(last_signal_dict)
+    if not session_check["allowed"]:
+        logger.info(f"Session filter blocked trade: {session_check['reason']}")
+        return
+    # ================================================
 
     is_fresh, latency, max_latency = _is_signal_fresh(last_signal, tick, config)
     if not is_fresh:
@@ -161,7 +191,20 @@ def run(config, execute: bool = False, live_tick=None, signal_data=None):
 
     if execute:
         request = _prepare_request(symbol, signal_type, lot, tick, signal_meta, symbol_info, config, system)
-        bridge.execute_order(request, signal_meta)
+        execute_result = bridge.execute_order(request, signal_meta)
+        
+        # ===== TRAILING STOPS (Manage Open Positions) =====
+        try:
+            trailing_manager = get_trailing_stop_manager(config)
+            trailing_actions = trailing_manager.update_all_trailing_stops()
+            if trailing_actions:
+                be_count = sum(1 for a in trailing_actions if a.get("action") == "break_even")
+                tr_count = sum(1 for a in trailing_actions if a.get("action") == "trailing")
+                if be_count > 0 or tr_count > 0:
+                    logger.info(f"Trailing stops: {be_count} break-even, {tr_count} trailing")
+        except Exception as e:
+            logger.warning(f"Trailing stop error (non-blocking): {e}")
+        # ==================================================
     else:
         logger.info(
             "[VALIDATION-AUDIT] System: %s | Signal: %s | Lot: %.2f | Reason: %s",
