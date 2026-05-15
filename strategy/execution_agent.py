@@ -190,6 +190,13 @@ def run(config, execute: bool = False, live_tick=None, signal_data=None):
         return
 
     if execute:
+        terminal_info = mt5.terminal_info()
+        if terminal_info is None or not getattr(terminal_info, 'trade_allowed', False):
+            logger.error(
+                "MT5 automatic trading is disabled. Enable Algo Trading / AutoTrading in the MT5 terminal and restart live execution."
+            )
+            return
+
         request = _prepare_request(symbol, signal_type, lot, tick, signal_meta, symbol_info, config, system)
         execute_result = bridge.execute_order(request, signal_meta)
         

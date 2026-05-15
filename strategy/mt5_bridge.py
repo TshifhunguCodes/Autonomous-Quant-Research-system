@@ -192,6 +192,7 @@ class MT5Bridge:
                 10014: "INVALID_VOLUME (Check lot size or insufficient margin)",
                 10030: "UNSUPPORTED_FILLING_MODE (Broker requires FOK or Return)",
                 10015: "INVALID_PRICE (Market price moved too far)",
+                10027: "CLIENT_DISABLES_AT (MT5 automatic trading is disabled). Enable Algo Trading/AutoTrading in terminal.",
             }.get(result.retcode, f"Error Code {result.retcode}")
             logger.error("❌ Order failed! %s", error_desc)
             return False
