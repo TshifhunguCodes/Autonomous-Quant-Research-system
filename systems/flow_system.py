@@ -25,6 +25,23 @@ class FlowSystem:
         out = df.copy()
         out = self._classify_smart_scalper_setups(out)
         out = self._apply_decision_framework(out)
+        out["flow_direction"] = out["flow_direction"].replace("", np.nan)
+        out.loc[out["flow_direction"].isna() & out["behavior_label"].eq("TREND_UP"), "flow_direction"] = "LONG"
+        out.loc[out["flow_direction"].isna() & out["behavior_label"].eq("TREND_DOWN"), "flow_direction"] = "SHORT"
+        out.loc[
+            out["flow_direction"].isna()
+            & out["pattern"].isin(["DOUBLE_BOTTOM", "BREAK_RETEST"])
+            & out.get("bullish_reversal", pd.Series(0, index=out.index)).eq(1),
+            "flow_direction",
+        ] = "LONG"
+        out.loc[
+            out["flow_direction"].isna()
+            & out["pattern"].isin(["DOUBLE_TOP", "BREAK_RETEST"])
+            & out.get("bearish_reversal", pd.Series(0, index=out.index)).eq(1),
+            "flow_direction",
+        ] = "SHORT"
+        out["flow_direction"] = out["flow_direction"].fillna("NEUTRAL")
+
         out["flow_score"] = 10
         out.loc[out["behavior_label"].isin(["RANGE", "BREAKOUT", "REVERSAL"]), "flow_score"] += 18
         out.loc[out["structure_state"].isin(["HL", "LH"]), "flow_score"] += 12
@@ -41,6 +58,10 @@ class FlowSystem:
         out.loc[out.get("breakout_quality", pd.Series(50.0, index=out.index)) >= 70, "flow_score"] += 8
         out.loc[out.get("continuation_strength", pd.Series(50.0, index=out.index)) >= 70, "flow_score"] += 6
         out.loc[out.get("liquidity_event", pd.Series("NONE", index=out.index)) == "CONFIRMED_SWEEP_REJECTION", "flow_score"] += 8
+        out.loc[out["flow_direction"].eq("LONG") & out.get("bullish_pattern_score", pd.Series(0, index=out.index)).gt(0), "flow_score"] += 8
+        out.loc[out["flow_direction"].eq("SHORT") & out.get("bearish_pattern_score", pd.Series(0, index=out.index)).gt(0), "flow_score"] += 8
+        out.loc[out["flow_direction"].eq("LONG") & out.get("bearish_reversal", pd.Series(0, index=out.index)).eq(1), "flow_score"] -= 15
+        out.loc[out["flow_direction"].eq("SHORT") & out.get("bullish_reversal", pd.Series(0, index=out.index)).eq(1), "flow_score"] -= 15
         out.loc[out.get("fake_breakout", pd.Series(0, index=out.index)) == 1, "flow_score"] -= 35
         out.loc[out.get("trap_probability", pd.Series(0.0, index=out.index)) >= 70, "flow_score"] -= 20
         out.loc[out.get("htf_exhaustion", pd.Series(50.0, index=out.index)) >= 60, "flow_score"] -= 18
@@ -53,16 +74,19 @@ class FlowSystem:
         out["flow_score"] = out["flow_score"].clip(lower=0, upper=100)
         out["flow_score"] = out[["flow_score", "institutional_trade_score"]].max(axis=1).clip(lower=0, upper=100)
 
-        min_flow_score = max(int(getattr(self.config.regime, "flow_min_confirm_score", 45)), 45)
+        min_flow_score = max(int(getattr(self.config.regime, "flow_min_confirm_score", 45)), 55)
         base_flow_allowed = (
             (out["flow_score"] >= min_flow_score)
+            & (out["flow_direction"].isin(["LONG", "SHORT"]))
             & (out.get("fake_breakout", pd.Series(0, index=out.index)) == 0)
             & (out.get("trap_probability", pd.Series(0.0, index=out.index)) < 75)
             & (out.get("multi_tf_alignment_score", pd.Series(50.0, index=out.index)) >= 60)
             & (~out.get("lifecycle_state", pd.Series("TREND_HEALTHY", index=out.index)).isin(["TREND_EXHAUSTING", "REVERSAL_WATCH"]))
         )
         framework_allowed = (
-            (out["institutional_trade_score"] >= 45)
+            (out["institutional_trade_score"] >= 60)
+            & (out["flow_score"] >= min_flow_score - 5)
+            & (out["flow_direction"].isin(["LONG", "SHORT"]))
             & (~out["strategy_mode"].eq("BOTH_PAUSED"))
             & (
                 out["continuation_decision"].eq("VALID")
@@ -72,6 +96,19 @@ class FlowSystem:
             )
         )
         flow_allowed = base_flow_allowed | framework_allowed
+
+        counter_trend_against_m5 = (
+            (out["behavior_label"].eq("TREND_UP") & out["flow_direction"].eq("SHORT"))
+            | (out["behavior_label"].eq("TREND_DOWN") & out["flow_direction"].eq("LONG"))
+        )
+        counter_trend_without_reversal = counter_trend_against_m5 & (
+            out["flow_counter_trend_allowed"].eq(0)
+            | (
+                out.get("confirmed_reversal", pd.Series(0, index=out.index)).eq(0)
+                & ~out["counter_trend_decision"].eq("ALLOWED")
+            )
+        )
+        flow_allowed &= ~counter_trend_without_reversal
 
         out["flow_signal"] = np.where(flow_allowed, "FLOW", "")
         out["flow_notes"] = np.where(

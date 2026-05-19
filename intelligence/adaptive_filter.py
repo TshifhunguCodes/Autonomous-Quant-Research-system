@@ -127,7 +127,9 @@ class AdaptiveFilter:
         blocked = False
         reason = ""
         
-        regime = str(signal_row.get("regime_label", "UNKNOWN"))
+        regime = str(signal_row.get("regime_label", signal_row.get("market_regime", signal_row.get("behavior_label", "UNKNOWN"))))
+        if regime == "UNKNOWN":
+            regime = str(signal_row.get("market_regime", signal_row.get("behavior_label", "UNKNOWN")))
         is_anomaly = signal_row.get("is_anomaly", False)
         anomaly_score = float(signal_row.get("anomaly_score", 0))
         
@@ -184,7 +186,7 @@ class AdaptiveFilter:
     
     def _check_regime_performance(self, signal_row: dict) -> dict:
         """Block trading in regimes where win rate is below threshold."""
-        regime = str(signal_row.get("regime_label", "UNKNOWN"))
+        regime = str(signal_row.get("regime_label", signal_row.get("market_regime", signal_row.get("behavior_label", "UNKNOWN"))))
         perf = self.regime_performance.get(regime, {"wins": 0, "losses": 0, "total": 0})
         
         blocked = False
@@ -217,7 +219,7 @@ class AdaptiveFilter:
             self.trades_since_last_block += 1
         
         # Update regime performance
-        regime = str(signal_row.get("regime_label", "UNKNOWN"))
+        regime = str(signal_row.get("regime_label", signal_row.get("market_regime", signal_row.get("behavior_label", "UNKNOWN"))))
         if regime not in self.regime_performance:
             self.regime_performance[regime] = {"wins": 0, "losses": 0, "total": 0}
         
@@ -229,11 +231,16 @@ class AdaptiveFilter:
         
         # Also feed to RL agent
         outcome_row = {
-            "behavior_label": signal_row.get("market_state", "RANGING"),
-            "structure_state": signal_row.get("trend", "NEUTRAL"),
-            "market_regime": signal_row.get("regime_label", "UNKNOWN"),
-            "alpha_score": signal_row.get("confirm_score", 0),
+            "behavior_label": signal_row.get("behavior_label", signal_row.get("market_state", "RANGING")),
+            "structure_state": signal_row.get("structure_state", "NEUTRAL"),
+            "direction": signal_row.get("direction", signal_row.get("confirmed_signal", signal_row.get("side", "NEUTRAL"))),
+            "market_regime": signal_row.get("regime_label", signal_row.get("market_regime", "UNKNOWN")),
+            "alpha_score": signal_row.get("alpha_score", signal_row.get("confirm_score", 0)),
             "flow_score": signal_row.get("flow_score", 0),
+            "confirmed_signal": signal_row.get("confirmed_signal", signal_row.get("side", "")),
+            "htf_bias": signal_row.get("htf_bias", signal_row.get("h1_bias", "NEUTRAL")),
+            "flow_trade_type": signal_row.get("flow_trade_type", "NONE"),
+            "session": signal_row.get("session", "UNKNOWN"),
             "pnl": pnl,
         }
         self.rl_agent.learn_from_outcome(outcome_row)

@@ -424,6 +424,26 @@ class DashboardStateManager:
                 "FLOW_EXP": {"pnl": 0, "trades": 0, "wins": 0, "losses": 0, "blocked": 0, "last_status": "N/A"}
             }
 
+        if self.outcomes_path.exists():
+            try:
+                outcomes = pd.read_csv(self.outcomes_path, low_memory=False, on_bad_lines="skip")
+                audit = pd.read_csv(self.audit_path, low_memory=False, on_bad_lines="skip")
+                stats = {}
+                for sys in ["ALPHA", "FLOW_EXP"]:
+                    sys_df = outcomes[outcomes["system"] == sys] if "system" in outcomes.columns else pd.DataFrame()
+                    blocked = len(audit[(audit["system"] == sys) & (audit["status"] == "BLOCKED")]) if {"system", "status"}.issubset(audit.columns) else 0
+                    stats[sys] = {
+                        "trades": len(sys_df),
+                        "wins": int((sys_df["pnl"] > 0).sum()) if "pnl" in sys_df.columns else 0,
+                        "losses": int((sys_df["pnl"] < 0).sum()) if "pnl" in sys_df.columns else 0,
+                        "pnl": round(float(sys_df["pnl"].sum()), 2) if "pnl" in sys_df.columns else 0.0,
+                        "blocked": blocked,
+                        "last_status": "OUTCOMES_SYNCED" if not sys_df.empty else "NO_CLOSED_TRADES",
+                    }
+                return stats
+            except Exception as e:
+                logger.error("Error reading LIVE outcome performance data: %s", e)
+
         try:
             df = pd.read_csv(self.audit_path, low_memory=False, on_bad_lines="skip")
         except Exception as e:

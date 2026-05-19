@@ -40,28 +40,28 @@ class ExecutionGate:
         score = signal.get("confirm_score", 0)
         direction = signal.get("confirmed_signal", "").upper()
         retracement_class = signal.get("retracement_class", "NON_TREND")
-        retracement_trade_allowed = bool(signal.get("retracement_trade_allowed", 1))
-        confirmed_reversal = bool(signal.get("confirmed_reversal", 0))
-        bos = bool(signal.get("bos", 0))
-        choch = bool(signal.get("choch", 0))
+        retracement_trade_allowed = ExecutionGate._truthy(signal.get("retracement_trade_allowed", 1))
+        confirmed_reversal = ExecutionGate._truthy(signal.get("confirmed_reversal", 0))
+        bos = ExecutionGate._truthy(signal.get("bos", 0))
+        choch = ExecutionGate._truthy(signal.get("choch", 0))
         lifecycle_state = signal.get("lifecycle_state", "TREND_HEALTHY")
         continuation_strength = float(signal.get("continuation_strength", 0.0))
         liquidity_event = str(signal.get("liquidity_event", "NONE"))
-        liquidity_sweep = bool(signal.get("liquidity_sweep", 0))
-        fake_breakout = bool(signal.get("fake_breakout", 0))
+        liquidity_sweep = ExecutionGate._truthy(signal.get("liquidity_sweep", 0))
+        fake_breakout = ExecutionGate._truthy(signal.get("fake_breakout", 0))
         breakout_quality = float(signal.get("breakout_quality", 50.0))
         trap_probability = float(signal.get("trap_probability", 0.0))
-        stop_hunt_detected = bool(signal.get("stop_hunt_detected", 0))
-        htf_bias = str(signal.get("htf_bias", "NEUTRAL"))
+        stop_hunt_detected = ExecutionGate._truthy(signal.get("stop_hunt_detected", 0))
+        htf_bias = ExecutionGate._norm_bias(signal.get("htf_bias", signal.get("h1_bias", "NEUTRAL")))
         htf_lifecycle = str(signal.get("htf_lifecycle", "UNKNOWN"))
         htf_exhaustion = float(signal.get("htf_exhaustion", 50.0))
         htf_liquidity_alignment = int(signal.get("htf_liquidity_alignment", 0))
         multi_tf_alignment_score = float(signal.get("multi_tf_alignment_score", 50.0))
-        smart_stop_ok = bool(signal.get("smart_stop_ok", True))
-        price_drift_ok = bool(signal.get("price_drift_ok", True))
+        smart_stop_ok = ExecutionGate._truthy(signal.get("smart_stop_ok", True))
+        price_drift_ok = ExecutionGate._truthy(signal.get("price_drift_ok", True))
         flow_trade_type = str(signal.get("flow_trade_type", "NONE"))
         is_flow_signal = str(signal.get("signal", "")).upper() == "FLOW" or flow_trade_type != "NONE"
-        flow_counter_trend_allowed = bool(signal.get("flow_counter_trend_allowed", 0))
+        flow_counter_trend_allowed = ExecutionGate._truthy(signal.get("flow_counter_trend_allowed", 0))
         max_signal_age_seconds = (5 if is_flow_signal else 10) * 60 # Increased FLOW max_signal_age from 3 to 5 minutes
         current_time = pd.to_datetime(signal.get("current_time", pd.Timestamp.utcnow()))
         if current_time.tzinfo is not None and signal_time.tzinfo is None:
@@ -77,6 +77,14 @@ class ExecutionGate:
 
         if signal_age_seconds > max_signal_age_seconds:
             return False, "NONE", 0, "STALE_SIGNAL_REJECTION", True
+
+        direction_ok, direction_reason = ExecutionGate._direction_confirmation_ok(signal)
+        if not direction_ok:
+            return False, "NONE", 0, direction_reason, True
+
+        frequency_ok, frequency_reason = ExecutionGate._recent_trade_frequency_ok(signal)
+        if not frequency_ok:
+            return False, "NONE", 0, frequency_reason, True
 
         # ===== ADAPTIVE FILTER (ML Layer) =====
         try:
@@ -106,7 +114,7 @@ class ExecutionGate:
             # Check FLOW daily limit first
             flow_tracker = get_flow_tracker()
             if flow_tracker.is_limit_reached():
-                return False, "FLOW_EXP", 0, "FLOW_DAILY_LIMIT_REACHED (6 max/day)", True
+                    return False, "FLOW_EXP", 0, "FLOW_DAILY_LIMIT_REACHED (10 max/day)", True
             
             if strategy_mode == "BOTH_PAUSED":
                 return False, "FLOW_EXP", 0, "FLOW_BOTH_PAUSED", True
@@ -136,7 +144,7 @@ class ExecutionGate:
             
             # Trend alignment requirement for FLOW
             flow_direction = direction
-            h1_bias = str(signal.get("htf_bias", "NEUTRAL"))
+            h1_bias = ExecutionGate._norm_bias(signal.get("htf_bias", signal.get("h1_bias", "NEUTRAL")))
             if h1_bias != "NEUTRAL":
                 h1_bullish = h1_bias == "BULLISH"
                 if flow_direction == "BUY" and not h1_bullish:
@@ -219,13 +227,13 @@ class ExecutionGate:
       # ELITE (ALPHA) signals MUST have a structural imbalance (FVG).
         # FLOW signals are exploratory and do not require full institutional displacement.
         if config.smc.require_ob_or_fvg and quality == "ELITE":
-            has_imbalance = bool(signal.get("fvg_bullish", False)) or bool(signal.get("fvg_bearish", False))
+            has_imbalance = ExecutionGate._truthy(signal.get("fvg_bullish", False)) or ExecutionGate._truthy(signal.get("fvg_bearish", False))
             if not has_imbalance:
                 return False, "NONE", 0, "ALPHA_SMC_NO_IMBALANCE_REJECTION", True
 
         # MSS Validation: ALPHA trades MUST have a recent liquidity sweep for high probability
         if quality == "ELITE":
-            has_sweep = bool(signal.get("sweep_high", False)) or bool(signal.get("sweep_low", False))
+            has_sweep = ExecutionGate._truthy(signal.get("sweep_high", False)) or ExecutionGate._truthy(signal.get("sweep_low", False))
             if not has_sweep and score < 90:
                 return False, "NONE", 0, "ALPHA_SMC_NO_SWEEP_REJECTION", True
 
@@ -357,7 +365,7 @@ class ExecutionGate:
             
             # Strict NY Protocol for Flow
             if 13 <= hour < 18:
-                if hour != 13 or not bool(signal.get("is_first_breakout", False)) or quality != "ELITE" or score < 90:
+                if hour != 13 or not ExecutionGate._truthy(signal.get("is_first_breakout", False)) or quality != "ELITE" or score < 90:
                     return False, "FLOW_EXP", 0, "NY_MICRO_STRATEGY_VIOLATION", True
                 lot_multiplier *= 0.5
 
@@ -401,7 +409,7 @@ class ExecutionGate:
                 return False, system_type, 0, "NY_GUARD_REJECTION", is_exploratory
                 
             if state == "VOLATILE":
-                is_major = bool(signal.get("major_support", 0)) or bool(signal.get("major_resistance", 0))
+                is_major = ExecutionGate._truthy(signal.get("major_support", 0)) or ExecutionGate._truthy(signal.get("major_resistance", 0))
                 if not is_major or score < 90:
                     return False, system_type, 0, "ALPHA_VOLATILE_REJECTION", is_exploratory
 
@@ -412,6 +420,112 @@ class ExecutionGate:
         final_lot = max(0.01, base_lot * lot_multiplier * perf_multiplier)
         
         return True, system_type, final_lot, "PASS", is_exploratory
+
+    @staticmethod
+    def _recent_trade_frequency_ok(signal):
+        audit_path = Path("data/live/execution_audit.csv")
+        if not audit_path.exists():
+            return True, "NO_AUDIT_HISTORY"
+        try:
+            df = pd.read_csv(audit_path, on_bad_lines="skip", low_memory=False)
+            if df.empty or "time" not in df.columns:
+                return True, "AUDIT_EMPTY"
+
+            df["time"] = pd.to_datetime(df["time"], errors="coerce")
+            df = df[df["time"].notna()].copy()
+            if df.empty:
+                return True, "AUDIT_NO_TIMES"
+
+            current_time = pd.to_datetime(signal.get("current_time", pd.Timestamp.utcnow())).tz_localize(None)
+            recent = df[df["time"] >= current_time - pd.Timedelta(hours=1)].copy()
+            if "status" in recent.columns:
+                recent = recent[recent["status"].astype(str).str.upper().eq("EXECUTED")]
+
+            direction = str(signal.get("confirmed_signal", "")).upper()
+            same_side = recent[recent.get("side", pd.Series("", index=recent.index)).astype(str).str.upper().eq(direction)]
+            if len(recent) >= 3:
+                return False, "HOURLY_TRADE_FREQUENCY_BLOCK"
+            if len(same_side) >= 2:
+                return False, "SAME_SIDE_FREQUENCY_BLOCK"
+            return True, "FREQUENCY_OK"
+        except Exception as e:
+            logger.warning(f"Frequency guard error (non-blocking): {e}")
+            return True, "FREQUENCY_GUARD_ERROR"
+
+    @staticmethod
+    def _norm_bias(value):
+        bias = str(value or "NEUTRAL").strip().upper()
+        return {
+            "LONG": "BULLISH",
+            "UP": "BULLISH",
+            "BUY": "BULLISH",
+            "SHORT": "BEARISH",
+            "DOWN": "BEARISH",
+            "SELL": "BEARISH",
+        }.get(bias, bias if bias in {"BULLISH", "BEARISH", "NEUTRAL"} else "NEUTRAL")
+
+    @staticmethod
+    def _truthy(value):
+        if value is None:
+            return False
+        try:
+            if pd.isna(value):
+                return False
+        except (TypeError, ValueError):
+            pass
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y"}
+        return bool(value)
+
+    @staticmethod
+    def _floatish(value, default=0.0):
+        try:
+            if value is None or pd.isna(value):
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _direction_confirmation_ok(signal):
+        direction = str(signal.get("confirmed_signal", "")).upper()
+        if direction not in {"BUY", "SELL"}:
+            return False, "NO_DIRECTION_REJECTION"
+
+        htf_bias = ExecutionGate._norm_bias(signal.get("htf_bias", signal.get("h1_bias", "NEUTRAL")))
+        state = str(signal.get("market_state", signal.get("market_regime", signal.get("behavior_label", "UNKNOWN")))).upper()
+        structure_state = str(signal.get("structure_state", "NEUTRAL")).upper()
+        flow_type = str(signal.get("flow_trade_type", "NONE")).upper()
+        confirmed_reversal = ExecutionGate._truthy(signal.get("confirmed_reversal", 0))
+        choch = ExecutionGate._truthy(signal.get("choch", 0))
+        bos = ExecutionGate._truthy(signal.get("bos", 0))
+        liquidity_sweep = ExecutionGate._truthy(signal.get("liquidity_sweep", 0)) or str(signal.get("liquidity_event", "")) == "CONFIRMED_SWEEP_REJECTION"
+        counter_type = flow_type in {"EXHAUSTION_FADE", "EARLY_REVERSAL_ENTRY"}
+
+        bullish_pattern = ExecutionGate._truthy(signal.get("bullish_reversal", 0)) or ExecutionGate._floatish(signal.get("bullish_pattern_score", 0)) > 0
+        bearish_pattern = ExecutionGate._truthy(signal.get("bearish_reversal", 0)) or ExecutionGate._floatish(signal.get("bearish_pattern_score", 0)) > 0
+        bullish_structure = structure_state in {"HH", "HL"} or ExecutionGate._truthy(signal.get("bos_up", 0)) or ExecutionGate._truthy(signal.get("demand_zone", 0)) or ExecutionGate._truthy(signal.get("is_support", 0))
+        bearish_structure = structure_state in {"LL", "LH"} or ExecutionGate._truthy(signal.get("bos_down", 0)) or ExecutionGate._truthy(signal.get("supply_zone", 0)) or ExecutionGate._truthy(signal.get("is_resistance", 0))
+
+        reversal_exception = counter_type and confirmed_reversal and choch and (bos or liquidity_sweep)
+
+        if htf_bias == "BULLISH" and direction == "SELL" and not reversal_exception:
+            return False, "HTF_BULLISH_SELL_BLOCK"
+        if htf_bias == "BEARISH" and direction == "BUY" and not reversal_exception:
+            return False, "HTF_BEARISH_BUY_BLOCK"
+        if state == "TREND_UP" and direction == "SELL" and not reversal_exception:
+            return False, "TREND_UP_SELL_BLOCK"
+        if state == "TREND_DOWN" and direction == "BUY" and not reversal_exception:
+            return False, "TREND_DOWN_BUY_BLOCK"
+        if direction == "BUY" and bearish_pattern and not (bullish_pattern or reversal_exception):
+            return False, "BEARISH_CANDLE_BUY_BLOCK"
+        if direction == "SELL" and bullish_pattern and not (bearish_pattern or reversal_exception):
+            return False, "BULLISH_CANDLE_SELL_BLOCK"
+        if direction == "BUY" and not (bullish_structure or bullish_pattern or reversal_exception):
+            return False, "BUY_STRUCTURE_CONFIRMATION_REQUIRED"
+        if direction == "SELL" and not (bearish_structure or bearish_pattern or reversal_exception):
+            return False, "SELL_STRUCTURE_CONFIRMATION_REQUIRED"
+        return True, "DIRECTION_CONFIRMED"
 
     @staticmethod
     def apply_adaptive_learning(config, signal):

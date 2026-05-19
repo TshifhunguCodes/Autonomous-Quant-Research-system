@@ -9,7 +9,7 @@ logger = get_logger(__name__)
 class FlowDailyTracker:
     """Tracks FLOW_EXP trades per day and enforces daily limits."""
     
-    def __init__(self, max_daily_trades=6):
+    def __init__(self, max_daily_trades=10):
         self.tracker_path = Path("data/live/flow_daily_count.csv")
         self.max_daily_trades = max_daily_trades
         self._ensure_file_exists()

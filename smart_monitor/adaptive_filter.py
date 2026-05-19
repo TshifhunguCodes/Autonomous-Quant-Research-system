@@ -95,7 +95,7 @@ class AdaptiveFilter:
             return
         
         try:
-            df = pd.read_csv(self.audit_path, parse_dates=['time', 'signal_time'])
+            df = pd.read_csv(self.audit_path, parse_dates=['time', 'signal_time'], on_bad_lines='skip')
             flow_df = df[df['system'] == 'FLOW_EXP']
             
             if len(flow_df) < 10:
@@ -167,7 +167,7 @@ class AdaptiveFilter:
             return False
         
         try:
-            df = pd.read_csv(self.audit_path, parse_dates=['time', 'signal_time'])
+            df = pd.read_csv(self.audit_path, parse_dates=['time', 'signal_time'], on_bad_lines='skip')
             today = date.today()
             
             # Filter for today's trades

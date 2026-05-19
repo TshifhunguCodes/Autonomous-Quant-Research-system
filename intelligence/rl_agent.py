@@ -13,6 +13,7 @@ from pathlib import Path
 import pickle
 import json
 import logging
+import ast
 from collections import defaultdict
 
 logger = logging.getLogger(__name__)
@@ -48,10 +49,10 @@ class RLAgent:
         self.recent_accuracy = []  # rolling window of last 100 decisions
         
         # Feature discretization bins
-        self.score_bins = [0, 30, 45, 60, 75, 100]
-        self.regime_labels = ["BULL", "BEAR", "SIDEWAYS", "VOLATILE", "UNKNOWN"]
-        self.trend_labels = ["BULLISH", "BEARISH", "NEUTRAL"]
-        self.market_states = ["TRENDING", "RANGING", "CHOPPY", "VOLATILE"]
+        self.score_bins = [0, 30, 45, 60, 70, 85, 100]
+        self.regime_labels = ["BULL", "BEAR", "SIDEWAYS", "VOLATILE", "UNKNOWN", "TREND_UP", "TREND_DOWN", "RANGE", "BREAKOUT", "REVERSAL", "CHOPPY"]
+        self.trend_labels = ["BULLISH", "BEARISH", "NEUTRAL", "LONG", "SHORT"]
+        self.market_states = ["TRENDING", "RANGING", "CHOPPY", "VOLATILE", "TREND_UP", "TREND_DOWN", "RANGE", "BREAKOUT", "REVERSAL"]
         
         self.model_path.parent.mkdir(parents=True, exist_ok=True)
         self._load()
@@ -66,10 +67,19 @@ class RLAgent:
         - regime: BULL/BEAR/SIDEWAYS/VOLATILE/UNKNOWN
         - score_bucket: binned confirm_score
         """
-        market_state = str(signal_row.get("market_state", signal_row.get("behavior_label", "RANGING")))
-        trend = str(signal_row.get("trend", "NEUTRAL"))
+        market_state = str(signal_row.get("market_state", signal_row.get("behavior_label", "RANGING"))).upper()
+        trend = str(signal_row.get("trend", signal_row.get("direction", "NEUTRAL"))).upper()
         regime = str(signal_row.get("regime_label", signal_row.get("market_regime", "UNKNOWN")))
         score = float(signal_row.get("confirm_score", signal_row.get("score", 0)))
+        direction = self._normalize_direction(signal_row.get("confirmed_signal", signal_row.get("direction", "")))
+        htf_bias = self._normalize_bias(signal_row.get("htf_bias", signal_row.get("h1_bias", "NEUTRAL")))
+        aligned = self._alignment_bucket(direction, htf_bias, market_state)
+        setup_type = str(signal_row.get("flow_trade_type", signal_row.get("signal", "NONE"))).upper()
+        if setup_type not in {"MOMENTUM_CONTINUATION", "MICRO_RETRACEMENT_REENTRY", "EXHAUSTION_FADE", "EARLY_REVERSAL_ENTRY", "ALPHA", "FLOW"}:
+            setup_type = "OTHER"
+        session = str(signal_row.get("session", "UNKNOWN")).upper()
+        if session not in {"LONDON", "NEW_YORK", "ASIAN", "EUROPEAN", "US", "UNKNOWN"}:
+            session = "OTHER"
         
         # Discretize score
         score_bucket = 0
@@ -83,9 +93,40 @@ class RLAgent:
         # Normalize strings
         market_state = market_state if market_state in self.market_states else "RANGING"
         trend = trend if trend in self.trend_labels else "NEUTRAL"
+        regime = regime.upper()
         regime = regime if regime in self.regime_labels else "UNKNOWN"
         
-        return (market_state, trend, regime, score_bucket)
+        return (market_state, trend, regime, score_bucket, direction, aligned, setup_type, session)
+
+    def _normalize_direction(self, value: str) -> str:
+        direction = str(value or "").strip().upper()
+        if direction in {"BUY", "LONG"}:
+            return "LONG"
+        if direction in {"SELL", "SHORT"}:
+            return "SHORT"
+        return "NEUTRAL"
+
+    def _normalize_bias(self, value: str) -> str:
+        bias = str(value or "NEUTRAL").strip().upper()
+        return {
+            "BUY": "BULLISH",
+            "LONG": "BULLISH",
+            "UP": "BULLISH",
+            "SELL": "BEARISH",
+            "SHORT": "BEARISH",
+            "DOWN": "BEARISH",
+        }.get(bias, bias if bias in {"BULLISH", "BEARISH", "NEUTRAL"} else "NEUTRAL")
+
+    def _alignment_bucket(self, direction: str, htf_bias: str, market_state: str) -> str:
+        if direction == "NEUTRAL":
+            return "NO_DIRECTION"
+        if (direction == "LONG" and htf_bias == "BEARISH") or (direction == "SHORT" and htf_bias == "BULLISH"):
+            return "HTF_CONFLICT"
+        if (direction == "LONG" and market_state == "TREND_DOWN") or (direction == "SHORT" and market_state == "TREND_UP"):
+            return "M5_COUNTER_TREND"
+        if (direction == "LONG" and htf_bias == "BULLISH") or (direction == "SHORT" and htf_bias == "BEARISH"):
+            return "HTF_ALIGNED"
+        return "NEUTRAL"
     
     def get_action(self, signal_row: dict, force_approve: bool = True) -> dict:
         """
@@ -111,13 +152,28 @@ class RLAgent:
                 "reason": "exploration_phase",
             }
         
+        # Unknown states should not be hard-rejected just because both Q-values
+        # are still zero. Let the rule stack decide while the agent gathers data.
+        q_values = self.q_table[state]
+        if abs(q_values.get(0, 0.0)) < 0.001 and abs(q_values.get(1, 0.0)) < 0.001:
+            return {
+                "action": 1,
+                "approved": True,
+                "confidence": 0.35,
+                "state": state,
+                "q_values": {str(k): round(v, 4) for k, v in q_values.items()},
+                "reason": "no_prior_state",
+            }
+
+        explored = False
+
         # Epsilon-greedy: explore or exploit
         if np.random.random() < self.epsilon and self.total_trades_seen < 100:
             # Explore: random action
             action = np.random.choice([0, 1])
+            explored = True
         else:
             # Exploit: best known action
-            q_values = self.q_table[state]
             action = max(q_values, key=q_values.get)
         
         # Get confidence from Q-value difference
@@ -133,7 +189,7 @@ class RLAgent:
             "confidence": round(confidence, 3),
             "state": state,
             "q_values": {str(k): round(v, 4) for k, v in q_values.items()},
-            "reason": "exploit" if np.random.random() >= self.epsilon else "explore",
+            "reason": "explore" if explored else "exploit",
         }
     
     def learn(self, signal_row: dict, action: int, reward: float) -> dict:
@@ -195,15 +251,21 @@ class RLAgent:
             dict with learning info
         """
         pnl = float(outcome_row.get("pnl", 0))
-        reward = 1 if pnl > 0 else (-1 if pnl < 0 else 0)
+        reward = max(-1.0, min(1.0, pnl))
+        if abs(reward) < 0.05:
+            reward = 0.0
         
         # Reconstruct state from outcome data
         signal_row = {
             "market_state": outcome_row.get("behavior_label", "RANGING"),
-            "trend": outcome_row.get("structure_state", "NEUTRAL"),
+            "trend": outcome_row.get("direction", outcome_row.get("side", outcome_row.get("structure_state", "NEUTRAL"))),
             "regime_label": outcome_row.get("market_regime", "UNKNOWN"),
-            "confirm_score": float(outcome_row.get("alpha_score", outcome_row.get("flow_score", 0))),
-            "score": float(outcome_row.get("alpha_score", outcome_row.get("flow_score", 0))),
+            "confirm_score": float(outcome_row.get("alpha_score", outcome_row.get("flow_score", outcome_row.get("confirm_score", 0))) or 0),
+            "score": float(outcome_row.get("alpha_score", outcome_row.get("flow_score", outcome_row.get("confirm_score", 0))) or 0),
+            "confirmed_signal": outcome_row.get("confirmed_signal", outcome_row.get("side", "")),
+            "htf_bias": outcome_row.get("htf_bias", "NEUTRAL"),
+            "flow_trade_type": outcome_row.get("flow_trade_type", "NONE"),
+            "session": outcome_row.get("session", "UNKNOWN"),
         }
         
         return self.learn(signal_row, 1, reward)  # We approved this trade, learn from outcome
@@ -285,7 +347,7 @@ class RLAgent:
                 for k, v in q_dict.items():
                     # Parse string tuple back
                     try:
-                        parsed = eval(k)
+                        parsed = ast.literal_eval(k)
                         self.q_table[parsed] = v
                     except:
                         pass

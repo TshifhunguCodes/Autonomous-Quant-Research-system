@@ -14,6 +14,7 @@ from engines.dynamic_exit_engine import DynamicExitEngine
 from strategy.execution_gate import ExecutionGate
 from strategy.mt5_bridge import MT5Bridge
 from strategy.trade_lifecycle_manager import TradeLifecycleManager
+from strategy.flow_daily_tracker import get_flow_tracker
 
 # NEW IMPORTS: Trailing Stops + Session Filter
 from strategy.trailing_stop import TrailingStopManager
@@ -199,6 +200,11 @@ def run(config, execute: bool = False, live_tick=None, signal_data=None):
 
         request = _prepare_request(symbol, signal_type, lot, tick, signal_meta, symbol_info, config, system)
         execute_result = bridge.execute_order(request, signal_meta)
+        if execute_result and system == "FLOW_EXP":
+            try:
+                get_flow_tracker().record_trade(pd.to_datetime(signal_meta.get("time")), signal_type.upper(), system)
+            except Exception as e:
+                logger.warning(f"FLOW daily tracker record error (non-blocking): {e}")
         
         # ===== TRAILING STOPS (Manage Open Positions) =====
         try:

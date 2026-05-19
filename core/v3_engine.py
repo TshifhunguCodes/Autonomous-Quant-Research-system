@@ -107,6 +107,22 @@ class AQRSV3Engine:
         out.loc[flow_mask, "signal"] = "FLOW"
         out["signal_owner"] = out["signal"]
 
+        out["resolved_direction"] = "NEUTRAL"
+        out.loc[out["signal"].eq("ALPHA"), "resolved_direction"] = out.get(
+            "alpha_direction", pd.Series("NEUTRAL", index=out.index)
+        )
+        out.loc[out["signal"].eq("FLOW"), "resolved_direction"] = out.get(
+            "flow_direction", pd.Series("NEUTRAL", index=out.index)
+        )
+        fallback_direction = out.get("direction", pd.Series("NEUTRAL", index=out.index)).fillna("NEUTRAL")
+        out.loc[
+            out["signal"].isin(["ALPHA", "FLOW"]) & out["resolved_direction"].isin(["", "NEUTRAL"]),
+            "resolved_direction",
+        ] = fallback_direction
+        invalid_direction = out["signal"].isin(["ALPHA", "FLOW"]) & ~out["resolved_direction"].isin(["LONG", "SHORT"])
+        out.loc[invalid_direction, "signal"] = "NO_TRADE"
+        out.loc[invalid_direction, "signal_owner"] = "NO_TRADE"
+
         # Backwards compatibility: unified score for dashboard and validator
         out["confirm_score"] = 0.0
         out.loc[out["signal"] == "ALPHA", "confirm_score"] = out["alpha_score"]
@@ -132,8 +148,9 @@ class AQRSV3Engine:
         out.loc[out["confirm_score"] >= 85, "quality"] = "ELITE"
         out.loc[out["signal"] == "NO_TRADE", "quality"] = "NONE"
         out["confirmed_signal"] = "no_trade"
-        out.loc[(out["signal"].isin(["ALPHA", "FLOW"])) & (out["direction"] == "LONG"), "confirmed_signal"] = "buy"
-        out.loc[(out["signal"].isin(["ALPHA", "FLOW"])) & (out["direction"] == "SHORT"), "confirmed_signal"] = "sell"
+        out.loc[(out["signal"].isin(["ALPHA", "FLOW"])) & (out["resolved_direction"] == "LONG"), "confirmed_signal"] = "buy"
+        out.loc[(out["signal"].isin(["ALPHA", "FLOW"])) & (out["resolved_direction"] == "SHORT"), "confirmed_signal"] = "sell"
+        out["direction"] = out["resolved_direction"]
         out["market_regime"] = out["behavior_label"]
         out["market_state"] = out["behavior_label"]
 

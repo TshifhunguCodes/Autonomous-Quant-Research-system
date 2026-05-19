@@ -13,6 +13,32 @@ class AlphaSystem:
 
     def generate_alpha_setups(self, df: pd.DataFrame) -> pd.DataFrame:
         out = df.copy()
+        out["alpha_direction"] = "NEUTRAL"
+        long_context = (
+            out["behavior_label"].eq("TREND_UP")
+            | out.get("direction", pd.Series("", index=out.index)).eq("LONG")
+        )
+        short_context = (
+            out["behavior_label"].eq("TREND_DOWN")
+            | out.get("direction", pd.Series("", index=out.index)).eq("SHORT")
+        )
+        bullish_confirmation = (
+            out["structure_state"].isin(["HH", "HL"])
+            | out.get("bos_up", pd.Series(0, index=out.index)).eq(1)
+            | out.get("bullish_reversal", pd.Series(0, index=out.index)).eq(1)
+            | out.get("demand_zone", pd.Series(0, index=out.index)).eq(1)
+            | out.get("is_support", pd.Series(0, index=out.index)).eq(1)
+        )
+        bearish_confirmation = (
+            out["structure_state"].isin(["LL", "LH"])
+            | out.get("bos_down", pd.Series(0, index=out.index)).eq(1)
+            | out.get("bearish_reversal", pd.Series(0, index=out.index)).eq(1)
+            | out.get("supply_zone", pd.Series(0, index=out.index)).eq(1)
+            | out.get("is_resistance", pd.Series(0, index=out.index)).eq(1)
+        )
+        out.loc[long_context & bullish_confirmation, "alpha_direction"] = "LONG"
+        out.loc[short_context & bearish_confirmation, "alpha_direction"] = "SHORT"
+
         out["alpha_score"] = 0
         out.loc[out["behavior_label"].isin(["TREND_UP", "TREND_DOWN"]), "alpha_score"] += 20
         out.loc[out["structure_state"].isin(["HH", "LL"]), "alpha_score"] += 15
@@ -26,9 +52,30 @@ class AlphaSystem:
         out.loc[out["behavior_confidence"] >= 70, "alpha_score"] += 8
         out.loc[out["volatility"] == 1, "alpha_score"] -= 5
         out.loc[out["choppy"] == 1, "alpha_score"] -= 10
+        out.loc[
+            out["alpha_direction"].eq("LONG")
+            & out.get("bullish_pattern_score", pd.Series(0, index=out.index)).gt(0),
+            "alpha_score",
+        ] += 8
+        out.loc[
+            out["alpha_direction"].eq("SHORT")
+            & out.get("bearish_pattern_score", pd.Series(0, index=out.index)).gt(0),
+            "alpha_score",
+        ] += 8
+        out.loc[
+            out["alpha_direction"].eq("LONG")
+            & out.get("bearish_reversal", pd.Series(0, index=out.index)).eq(1),
+            "alpha_score",
+        ] -= 18
+        out.loc[
+            out["alpha_direction"].eq("SHORT")
+            & out.get("bullish_reversal", pd.Series(0, index=out.index)).eq(1),
+            "alpha_score",
+        ] -= 18
 
         alpha_allowed = (
             (out["alpha_score"] >= 75)
+            & (out["alpha_direction"].isin(["LONG", "SHORT"]))
             & (out.get("fake_breakout", pd.Series(0, index=out.index)) == 0)
             & (out.get("trap_probability", pd.Series(0.0, index=out.index)) < 70)
             & (out.get("multi_tf_alignment_score", pd.Series(50.0, index=out.index)) >= 65)

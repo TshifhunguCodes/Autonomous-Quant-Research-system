@@ -23,6 +23,7 @@ class SimpleTradeLearner:
         self.training_data_path = Path("data/ai/training_data.csv")
         self.min_trades_for_learning = 15
         self.feature_weights = self._initialize_weights()
+        self.is_trained = False
         
     def _initialize_weights(self):
         """Initialize feature weights"""
@@ -39,14 +40,14 @@ class SimpleTradeLearner:
         }
     
     def train(self, force_retrain=False):
-        """Train the model on historical trade data"""
-        audit_path = Path("data/live/execution_audit.csv")
-        if not audit_path.exists():
+        """Train the model on realized closed trade outcomes."""
+        outcomes_path = Path("data/live/trade_outcomes.csv")
+        if not outcomes_path.exists():
             return False
         
         try:
-            df = pd.read_csv(audit_path, parse_dates=['time', 'signal_time'])
-            flow_df = df[df['system'] == 'FLOW_EXP']
+            df = pd.read_csv(outcomes_path, parse_dates=['entry_time', 'signal_time', 'exit_time'], on_bad_lines='skip')
+            flow_df = df[df['system'].astype(str).str.upper() == 'FLOW_EXP'].copy()
             
             if len(flow_df) < self.min_trades_for_learning:
                 logger.info(f"Not enough trades for learning ({len(flow_df)} < {self.min_trades_for_learning})")
@@ -62,9 +63,10 @@ class SimpleTradeLearner:
             self._update_feature_weights(features, outcomes)
             
             # Save model
+            self.is_trained = True
             self._save_model()
             
-            logger.info(f"SimpleTradeLearner trained on {len(outcomes)} trades")
+            logger.info(f"SimpleTradeLearner trained on {len(outcomes)} realized FLOW outcomes")
             return True
             
         except Exception as e:
@@ -77,28 +79,23 @@ class SimpleTradeLearner:
         outcomes = []
         
         for _, row in df.iterrows():
-            if row['status'] != 'EXECUTED':
-                continue
-            
             # Extract features
             feature_vector = {
                 'confluence_count': self._count_confluences(row),
-                'htf_alignment': 1 if row.get('htf_bias', 'NEUTRAL') != 'NEUTRAL' else 0,
+                'htf_alignment': self._directional_alignment(row),
                 'momentum_score': self._calculate_momentum(row),
                 'volume_ratio': float(row.get('volume', 1) or 1) / max(float(row.get('volume_avg_20', 1) or 1), 0.1),
                 'spread_quality': max(0, 100 - float(row.get('spread', 0))) / 100,
-                'confirm_score': float(row.get('confirm_score', 50)) / 100,
+                'confirm_score': float(row.get('flow_score', row.get('confirm_score', 50)) or 50) / 100,
                 'structure_score': self._calculate_structure(row),
-                'hour_quality': self._get_hour_quality(pd.to_datetime(row['time']).hour),
-                'regime_suitability': self._get_regime_suitability(row.get('regime', 'UNKNOWN'))
+                'hour_quality': self._get_hour_quality(pd.to_datetime(row.get('signal_time', row.get('entry_time'))).hour),
+                'regime_suitability': self._get_regime_suitability(row.get('market_regime', row.get('regime', 'UNKNOWN')))
             }
             
             features.append(feature_vector)
             
-            # Estimate outcome (simplified - would be better with actual outcomes)
-            # Use spread and quality as proxy for expected outcome
-            quality_score = self._estimate_quality(row)
-            outcome = 1 if quality_score > 65 else 0  # Binary outcome
+            pnl = float(row.get('pnl', 0) or 0)
+            outcome = 1 if pnl > 0 else 0
             outcomes.append(outcome)
         
         return features, outcomes
@@ -106,22 +103,38 @@ class SimpleTradeLearner:
     def _count_confluences(self, row):
         """Count technical confluences"""
         count = 0
-        if row.get('fvg_bullish') or row.get('fvg_bearish'):
+        if self._truthy(row.get('fvg_bullish')) or self._truthy(row.get('fvg_bearish')):
             count += 1
-        if row.get('order_block') or row.get('demand_zone') or row.get('supply_zone'):
+        if self._truthy(row.get('order_block')) or self._truthy(row.get('demand_zone')) or self._truthy(row.get('supply_zone')):
             count += 1
-        if row.get('liquidity_sweep') or row.get('sweep_high') or row.get('sweep_low'):
+        if self._truthy(row.get('liquidity_sweep')) or self._truthy(row.get('sweep_high')) or self._truthy(row.get('sweep_low')):
             count += 1
-        if row.get('bos') or row.get('choch'):
+        if self._truthy(row.get('bos')) or self._truthy(row.get('choch')):
             count += 1
-        if row.get('major_support') or row.get('major_resistance'):
+        if self._truthy(row.get('major_support')) or self._truthy(row.get('major_resistance')):
             count += 1
         return min(count / 5, 1.0)  # Normalize to 0-1
+
+    def _truthy(self, value):
+        if value is None:
+            return False
+        try:
+            if pd.isna(value):
+                return False
+        except (TypeError, ValueError):
+            pass
+        if isinstance(value, str):
+            return value.strip().lower() in {'1', 'true', 'yes', 'y'}
+        return bool(value)
     
     def _calculate_momentum(self, row):
         """Calculate momentum score"""
         rsi = float(row.get('rsi14', 50) or 50)
-        direction = str(row.get('side', '')).upper()
+        direction = str(row.get('side', row.get('confirmed_signal', row.get('direction', '')))).upper()
+        if direction == 'LONG':
+            direction = 'BUY'
+        elif direction == 'SHORT':
+            direction = 'SELL'
         
         if direction == 'BUY':
             if 50 < rsi < 70:
@@ -134,13 +147,33 @@ class SimpleTradeLearner:
             elif rsi >= 50 or rsi <= 30:
                 return 0.3
         return 0.5
+
+    def _directional_alignment(self, row):
+        """Return 1 for aligned, 0.5 neutral, 0 for direct HTF conflict."""
+        side = str(row.get('side', row.get('confirmed_signal', ''))).upper()
+        if side == 'BUY':
+            side = 'LONG'
+        elif side == 'SELL':
+            side = 'SHORT'
+        bias = str(row.get('htf_bias', 'NEUTRAL')).upper()
+        if bias in ['BUY', 'LONG', 'UP']:
+            bias = 'BULLISH'
+        elif bias in ['SELL', 'SHORT', 'DOWN']:
+            bias = 'BEARISH'
+        if side == 'LONG' and bias == 'BULLISH':
+            return 1.0
+        if side == 'SHORT' and bias == 'BEARISH':
+            return 1.0
+        if side in ['LONG', 'SHORT'] and bias in ['BULLISH', 'BEARISH']:
+            return 0.0
+        return 0.5
     
     def _calculate_structure(self, row):
         """Calculate structure score"""
         score = 0.5
-        if row.get('bos'):
+        if self._truthy(row.get('bos')):
             score += 0.2
-        if row.get('choch'):
+        if self._truthy(row.get('choch')):
             score += 0.2
         lifecycle = row.get('lifecycle_state', 'TREND_HEALTHY')
         if lifecycle in ['TREND_HEALTHY', 'BREAKOUT_EXPANSION']:
@@ -228,7 +261,7 @@ class SimpleTradeLearner:
         # Extract features from signal
         features = {
             'confluence_count': self._count_confluences(signal),
-            'htf_alignment': 1 if signal.get('htf_bias', 'NEUTRAL') != 'NEUTRAL' else 0,
+            'htf_alignment': self._directional_alignment(signal),
             'momentum_score': self._calculate_momentum(signal),
             'volume_ratio': float(signal.get('volume', 1) or 1) / max(float(signal.get('volume_avg_20', 1) or 1), 0.1),
             'spread_quality': max(0, 100 - float(signal.get('spread', 0))) / 100,
@@ -260,6 +293,11 @@ class SimpleTradeLearner:
             tuple: (allow: bool, probability: float, reason: str)
         """
         probability = self.predict_success_probability(signal)
+
+        # Before the model has enough realized outcomes, do not let this light
+        # learner veto trades. The rule stack and quality scorer remain active.
+        if not self.is_trained:
+            return True, probability, f"ML_WARMUP_PASS (p={probability:.2f})"
         
         if probability >= threshold:
             return True, probability, f"ML_APPROVE (p={probability:.2f})"
@@ -271,6 +309,7 @@ class SimpleTradeLearner:
         model_data = {
             'feature_weights': self.feature_weights,
             'last_trained': datetime.now().isoformat(),
+            'trained': True,
             'version': '1.0'
         }
         
@@ -291,6 +330,7 @@ class SimpleTradeLearner:
                 model_data = json.load(f)
             
             self.feature_weights = model_data.get('feature_weights', self.feature_weights)
+            self.is_trained = bool(model_data.get('trained', True))
             return True
         except Exception as e:
             logger.error(f"Error loading model: {e}")

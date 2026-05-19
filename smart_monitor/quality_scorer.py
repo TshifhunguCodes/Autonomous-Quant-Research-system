@@ -3,6 +3,7 @@ Trade Quality Scorer - Evaluates trade quality before entry
 """
 
 import numpy as np
+import pandas as pd
 from core.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -74,28 +75,28 @@ class TradeQualityScorer:
         max_confluences = 6
         
         # FVG (Fair Value Gap) - support multiple field names
-        if signal.get('fvg_bullish') or signal.get('fvg_bearish') or signal.get('fvg_zone'):
+        if self._truthy(signal.get('fvg_bullish')) or self._truthy(signal.get('fvg_bearish')) or self._truthy(signal.get('fvg_zone')):
             confluences += 1
         
         # Order Block - support multiple field names
-        if signal.get('order_block') or signal.get('demand_zone') or signal.get('supply_zone'):
+        if self._truthy(signal.get('order_block')) or self._truthy(signal.get('demand_zone')) or self._truthy(signal.get('supply_zone')):
             confluences += 1
         
         # Liquidity Sweep
-        if signal.get('liquidity_sweep') or signal.get('sweep_high') or signal.get('sweep_low'):
+        if self._truthy(signal.get('liquidity_sweep')) or self._truthy(signal.get('sweep_high')) or self._truthy(signal.get('sweep_low')):
             confluences += 1
         
         # HTF Bias Alignment
-        htf_bias = signal.get('htf_bias', 'NEUTRAL')
+        htf_bias = self._normalize_bias(signal.get('htf_bias', signal.get('h1_bias', 'NEUTRAL')))
         if htf_bias != 'NEUTRAL':
             confluences += 1
         
         # Major Support/Resistance
-        if signal.get('major_support') or signal.get('major_resistance') or signal.get('support_level') or signal.get('resistance_level'):
+        if self._truthy(signal.get('major_support')) or self._truthy(signal.get('major_resistance')) or self._truthy(signal.get('support_level')) or self._truthy(signal.get('resistance_level')):
             confluences += 1
         
         # BOS/CHOCH - support multiple field names
-        if signal.get('bos') or signal.get('bos_up') or signal.get('bos_down') or signal.get('choch'):
+        if self._truthy(signal.get('bos')) or self._truthy(signal.get('bos_up')) or self._truthy(signal.get('bos_down')) or self._truthy(signal.get('choch')):
             confluences += 1
         
         return (confluences / max_confluences) * 100
@@ -109,7 +110,7 @@ class TradeQualityScorer:
             direction = 'BUY'
         elif direction == 'SHORT':
             direction = 'SELL'
-        htf_bias = signal.get('htf_bias', 'NEUTRAL')
+        htf_bias = self._normalize_bias(signal.get('htf_bias', signal.get('h1_bias', 'NEUTRAL')))
         # Support multiple field names for market state
         market_state = str(signal.get('market_state', signal.get('market_regime', signal.get('behavior_label', 'UNKNOWN')))).upper()
         
@@ -139,6 +140,30 @@ class TradeQualityScorer:
                 score -= 20  # Counter-trend
         
         return max(0, min(100, score))
+
+    def _normalize_bias(self, value):
+        bias = str(value or 'NEUTRAL').strip().upper()
+        aliases = {
+            'LONG': 'BULLISH',
+            'UP': 'BULLISH',
+            'BUY': 'BULLISH',
+            'SHORT': 'BEARISH',
+            'DOWN': 'BEARISH',
+            'SELL': 'BEARISH',
+        }
+        return aliases.get(bias, bias if bias in {'BULLISH', 'BEARISH', 'NEUTRAL'} else 'NEUTRAL')
+
+    def _truthy(self, value):
+        if value is None:
+            return False
+        try:
+            if np.isscalar(value) and pd.isna(value):
+                return False
+        except (TypeError, ValueError):
+            pass
+        if isinstance(value, str):
+            return value.strip().lower() in {'1', 'true', 'yes', 'y'}
+        return bool(value)
     
     def _calculate_momentum_score(self, signal):
         """Calculate score based on momentum indicators (0-100)"""
@@ -225,11 +250,11 @@ class TradeQualityScorer:
         score = 50  # Neutral
         
         # BOS (Break of Structure) - support multiple field names
-        if signal.get('bos') or signal.get('bos_up') or signal.get('bos_down'):
+        if self._truthy(signal.get('bos')) or self._truthy(signal.get('bos_up')) or self._truthy(signal.get('bos_down')):
             score += 15
         
         # CHOCH (Change of Character)
-        if signal.get('choch'):
+        if self._truthy(signal.get('choch')):
             score += 15
         
         # Liquidity Event

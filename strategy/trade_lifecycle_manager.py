@@ -23,6 +23,19 @@ class TradeLifecycleManager:
     _partial_exit_tickets: set[int] = set()
 
     @staticmethod
+    def _truthy(value: Any) -> bool:
+        if value is None:
+            return False
+        try:
+            if pd.isna(value):
+                return False
+        except (TypeError, ValueError):
+            pass
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y"}
+        return bool(value)
+
+    @staticmethod
     def build_trade_plan(signal: dict[str, Any], signal_type: str, live_price: float, config: Any) -> dict[str, Any]:
         atr_value = float(signal.get("atr14", signal.get("atr", 0.0)) or 0.0)
         spread = float(signal.get("spread", 0.0) or 0.0)
@@ -45,7 +58,7 @@ class TradeLifecycleManager:
                 float(signal.get("support_level", candle_low) or candle_low),
                 candle_low,
             )
-            if bool(signal.get("order_block", 0)) or bool(signal.get("demand_zone", 0)):
+            if TradeLifecycleManager._truthy(signal.get("order_block", 0)) or TradeLifecycleManager._truthy(signal.get("demand_zone", 0)):
                 structural_anchor = min(structural_anchor, float(signal.get("open", candle_low) or candle_low), candle_low)
         else:
             structural_anchor = max(
@@ -53,11 +66,11 @@ class TradeLifecycleManager:
                 float(signal.get("resistance_level", candle_high) or candle_high),
                 candle_high,
             )
-            if bool(signal.get("supply_zone", 0)) or bool(signal.get("order_block", 0)):
+            if TradeLifecycleManager._truthy(signal.get("supply_zone", 0)) or TradeLifecycleManager._truthy(signal.get("order_block", 0)):
                 structural_anchor = max(structural_anchor, float(signal.get("open", candle_high) or candle_high), candle_high)
 
         volatility_buffer = 1.0
-        if lifecycle_state in ["BREAKOUT_EXPANSION", "TREND_EXHAUSTING"] or bool(signal.get("volatility", 0)):
+        if lifecycle_state in ["BREAKOUT_EXPANSION", "TREND_EXHAUSTING"] or TradeLifecycleManager._truthy(signal.get("volatility", 0)):
             volatility_buffer = 1.35  # Slightly higher for volatile conditions
 
         # Wider floor distance - minimum 12 points instead of 8, better spread coverage

@@ -1,9 +1,35 @@
 import MetaTrader5 as mt5
 import pandas as pd
 from pathlib import Path
+import csv
 from core.logging_utils import get_logger
 
 logger = get_logger(__name__)
+
+AUDIT_COLUMNS = [
+    "time",
+    "signal_time",
+    "symbol",
+    "side",
+    "system",
+    "regime",
+    "setup",
+    "behavior_label",
+    "structure_state",
+    "zone_type",
+    "alpha_score",
+    "flow_score",
+    "reason_for_entry",
+    "is_exploratory",
+    "lot",
+    "price",
+    "status",
+    "spread",
+    "slippage",
+    "retcode",
+    "pnl",
+    "comment",
+]
 
 class MT5Bridge:
     def __init__(self, config):
@@ -63,14 +89,14 @@ class MT5Bridge:
     def check_daily_drawdown(self):
         """Checks if the daily drawdown limit has been reached."""
         max_dd = getattr(self.config.risk, "max_daily_drawdown_pct", 2.0)
-        if not self.audit_log_path.exists():
+        if not self.outcomes_log_path.exists():
             return True
             
         try:
-            df = pd.read_csv(self.audit_log_path, parse_dates=["time"], on_bad_lines='skip')
+            df = pd.read_csv(self.outcomes_log_path, parse_dates=["exit_time"], on_bad_lines='skip')
             today = pd.Timestamp.now().normalize()
             # Check realized PnL from closed trades today
-            daily_trades = df[(df["time"] >= today) & (df["status"].isin(["CLOSED_TP", "CLOSED_SL"]))]
+            daily_trades = df[df["exit_time"] >= today]
             if daily_trades.empty:
                 return True
                 
@@ -98,8 +124,8 @@ class MT5Bridge:
             return False
         return True
 
-    def sync_closed_trades(self):
-        """Polls MT5 history to find closed trades and logs their outcomes for learning."""
+    def _legacy_sync_closed_trades(self):
+        """Old matcher retained for reference; sync_closed_trades below is used."""
         if not mt5.initialize() or not self.audit_log_path.exists():
             return
 
@@ -154,6 +180,171 @@ class MT5Bridge:
                 logger.info("📈 Logged %d new trade outcomes for intelligence upgrade.", len(new_outcomes))
         except Exception as e:
             logger.error("Error syncing closed trades: %s", e)
+
+    def sync_closed_trades(self):
+        """Poll MT5 history and write closed trade PnL to trade_outcomes.csv."""
+        if not mt5.initialize() or not self.audit_log_path.exists():
+            return
+
+        try:
+            audit_df = self._read_audit_log()
+            if audit_df.empty:
+                return
+
+            executed = audit_df[audit_df["status"] == "EXECUTED"].copy()
+            executed["time"] = pd.to_datetime(executed["time"], errors="coerce")
+            executed["signal_time"] = pd.to_datetime(executed["signal_time"], errors="coerce")
+            executed = executed.dropna(subset=["time"])
+
+            if self.outcomes_log_path.exists():
+                outcomes_df = pd.read_csv(self.outcomes_log_path, parse_dates=["entry_time"])
+                executed = executed[~executed["time"].isin(outcomes_df["entry_time"])]
+
+            if executed.empty:
+                return
+
+            oldest_entry = executed["time"].min() - pd.Timedelta(hours=1)
+            from_date = min(oldest_entry, pd.Timestamp.now() - pd.Timedelta(days=14))
+            history_deals = mt5.history_deals_get(
+                from_date.to_pydatetime(),
+                pd.Timestamp.now().to_pydatetime(),
+            )
+            if not history_deals:
+                return
+
+            deals_df = pd.DataFrame([deal._asdict() for deal in history_deals])
+            if deals_df.empty:
+                return
+            deals_df["time"] = pd.to_datetime(deals_df["time"], unit="s")
+
+            new_outcomes = []
+            for _, trade in executed.iterrows():
+                outcome = self._match_closed_trade(trade, deals_df)
+                if outcome is None:
+                    continue
+
+                new_outcomes.append({
+                    "entry_time": trade["time"],
+                    "signal_time": trade.get("signal_time"),
+                    "exit_time": outcome["exit_time"],
+                    "symbol": trade.get("symbol", self.config.market.symbol),
+                    "side": trade.get("side", "UNKNOWN"),
+                    "system": trade.get("system", "UNKNOWN"),
+                    "result": "WIN" if outcome["pnl"] > 0 else ("LOSS" if outcome["pnl"] < 0 else "BREAKEVEN"),
+                    "pnl": outcome["pnl"],
+                    "entry_price": trade.get("price", 0),
+                    "exit_price": outcome["exit_price"],
+                    "position_id": outcome["position_id"],
+                    "entry_deal": outcome["entry_deal"],
+                    "exit_deals": outcome["exit_deals"],
+                    "behavior_label": trade.get("behavior_label", "UNKNOWN"),
+                    "market_regime": trade.get("regime", trade.get("market_regime", "UNKNOWN")),
+                    "structure_state": trade.get("structure_state", "UNKNOWN"),
+                    "alpha_score": trade.get("alpha_score", 0),
+                    "flow_score": trade.get("flow_score", 0),
+                    "spread": trade.get("spread", 0),
+                    "slippage": trade.get("slippage", 0),
+                    "session": trade.get("session", "UNKNOWN"),
+                    "setup": trade.get("setup", "NONE"),
+                    "comment": trade.get("comment", ""),
+                })
+
+            if new_outcomes:
+                pd.DataFrame(new_outcomes).to_csv(
+                    self.outcomes_log_path,
+                    mode="a",
+                    index=False,
+                    header=not self.outcomes_log_path.exists(),
+                )
+                try:
+                    from strategy.execution_gate import ExecutionGate
+
+                    for outcome in new_outcomes:
+                        ExecutionGate.record_trade_outcome(outcome, float(outcome.get("pnl", 0.0) or 0.0))
+                except Exception as e:
+                    logger.warning("Adaptive outcome update failed: %s", e)
+                logger.info("Logged %d closed trade outcomes.", len(new_outcomes))
+        except Exception as e:
+            logger.error("Error syncing closed trades: %s", e)
+
+    def _read_audit_log(self):
+        """Read old and new execution_audit rows without dropping mixed-schema entries."""
+        if not self.audit_log_path.exists():
+            return pd.DataFrame(columns=AUDIT_COLUMNS)
+
+        rows = []
+        with self.audit_log_path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.reader(handle)
+            header = next(reader, [])
+            for raw in reader:
+                if len(raw) >= len(AUDIT_COLUMNS):
+                    rows.append(raw[:len(AUDIT_COLUMNS)])
+                    continue
+
+                row_map = dict(zip(header, raw))
+                rows.append([row_map.get(col, "") for col in AUDIT_COLUMNS])
+
+        df = pd.DataFrame(rows, columns=AUDIT_COLUMNS)
+        for col in ["time", "signal_time"]:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+        for col in ["alpha_score", "flow_score", "lot", "price", "spread", "slippage", "pnl"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df
+
+    def _match_closed_trade(self, trade, deals_df):
+        """Match one audit entry to a closed MT5 position and summarize realized PnL."""
+        symbol = str(trade.get("symbol", self.config.market.symbol))
+        comment = str(trade.get("comment", "") or "")
+        entry_time = pd.to_datetime(trade.get("time"), errors="coerce")
+        if pd.isna(entry_time):
+            return None
+
+        candidates = deals_df[deals_df["time"] >= entry_time - pd.Timedelta(minutes=10)].copy()
+        if "symbol" in candidates.columns:
+            candidates = candidates[candidates["symbol"].astype(str) == symbol]
+        if "comment" in candidates.columns and comment:
+            comment_matches = candidates[candidates["comment"].astype(str) == comment]
+            if not comment_matches.empty:
+                candidates = comment_matches
+
+        entry_code = getattr(mt5, "DEAL_ENTRY_IN", 0)
+        exit_code = getattr(mt5, "DEAL_ENTRY_OUT", 1)
+        entry_col = candidates["entry"] if "entry" in candidates.columns else pd.Series(dtype=int)
+        entry_deals = candidates[entry_col == entry_code].copy()
+        if entry_deals.empty:
+            return None
+
+        entry_deals["time_diff"] = (entry_deals["time"] - entry_time).abs()
+        entry_deal = entry_deals.sort_values("time_diff").iloc[0]
+        position_id = entry_deal.get("position_id", entry_deal.get("position", None))
+        if pd.isna(position_id):
+            return None
+
+        pos_col = deals_df["position_id"] if "position_id" in deals_df.columns else deals_df.get("position")
+        if pos_col is None or "entry" not in deals_df.columns:
+            return None
+        all_entries = deals_df["entry"]
+        exits = deals_df[
+            (pos_col == position_id)
+            & (all_entries == exit_code)
+            & (deals_df["time"] >= entry_deal["time"])
+        ].copy()
+        if exits.empty:
+            return None
+
+        pnl_cols = [col for col in ["profit", "commission", "swap", "fee"] if col in exits.columns]
+        pnl = float(exits[pnl_cols].fillna(0).sum().sum()) if pnl_cols else 0.0
+        exit_price = float(exits.sort_values("time").iloc[-1].get("price", 0.0) or 0.0)
+        exit_deals = ",".join(str(int(ticket)) for ticket in exits.get("ticket", pd.Series(dtype=int)).dropna())
+
+        return {
+            "pnl": pnl,
+            "exit_time": exits["time"].max(),
+            "exit_price": exit_price,
+            "position_id": position_id,
+            "entry_deal": entry_deal.get("ticket", ""),
+            "exit_deals": exit_deals,
+        }
 
     def execute_order(self, request, metadata):
         """Sends order to MT5 and logs result with metadata."""
