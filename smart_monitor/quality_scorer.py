@@ -117,12 +117,20 @@ class TradeQualityScorer:
         score = 50  # Neutral starting point
         
         # HTF Alignment
+        local_aligned = False
+        if market_state in ['TREND_UP', 'TREND_DOWN', 'UPTREND', 'DOWNTREND']:
+            normalized_state = 'TREND_UP' if market_state == 'UPTREND' else 'TREND_DOWN' if market_state == 'DOWNTREND' else market_state
+            local_aligned = (
+                (direction == 'BUY' and normalized_state == 'TREND_UP')
+                or (direction == 'SELL' and normalized_state == 'TREND_DOWN')
+            )
+
         if htf_bias != 'NEUTRAL':
             if (direction == 'BUY' and htf_bias == 'BULLISH') or \
                (direction == 'SELL' and htf_bias == 'BEARISH'):
                 score += 30  # Strong alignment
             else:
-                score -= 30  # Misalignment
+                score -= 10 if local_aligned else 30  # HTF lag is less severe when local trend is clean
         else:
             score -= 10  # No HTF bias
         

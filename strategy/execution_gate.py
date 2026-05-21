@@ -147,9 +147,23 @@ class ExecutionGate:
             h1_bias = ExecutionGate._norm_bias(signal.get("htf_bias", signal.get("h1_bias", "NEUTRAL")))
             if h1_bias != "NEUTRAL":
                 h1_bullish = h1_bias == "BULLISH"
-                if flow_direction == "BUY" and not h1_bullish:
+                local_buy_continuation = (
+                    flow_direction == "BUY"
+                    and state == "TREND_UP"
+                    and flow_trade_type in ["NONE", "MOMENTUM_CONTINUATION", "MICRO_RETRACEMENT_REENTRY"]
+                    and multi_tf_alignment_score >= 45
+                    and htf_exhaustion < 80
+                )
+                local_sell_continuation = (
+                    flow_direction == "SELL"
+                    and state == "TREND_DOWN"
+                    and flow_trade_type in ["NONE", "MOMENTUM_CONTINUATION", "MICRO_RETRACEMENT_REENTRY"]
+                    and multi_tf_alignment_score >= 45
+                    and htf_exhaustion < 80
+                )
+                if flow_direction == "BUY" and not h1_bullish and not local_buy_continuation:
                     return False, "FLOW_EXP", 0, "FLOW_H1_MISALIGNMENT", True
-                if flow_direction == "SELL" and h1_bullish:
+                if flow_direction == "SELL" and h1_bullish and not local_sell_continuation:
                     return False, "FLOW_EXP", 0, "FLOW_H1_MISALIGNMENT", True
             
             # Momentum confirmation (RSI filter)
@@ -509,14 +523,46 @@ class ExecutionGate:
 
         reversal_exception = counter_type and confirmed_reversal and choch and (bos or liquidity_sweep)
 
-        if htf_bias == "BULLISH" and direction == "SELL" and not reversal_exception:
+        flow_type = str(signal.get("flow_trade_type", "NONE")).upper()
+        is_flow = str(signal.get("signal", "")).upper() == "FLOW" or flow_type != "NONE"
+        local_continuation = flow_type in {"MOMENTUM_CONTINUATION", "MICRO_RETRACEMENT_REENTRY", "NONE"}
+        flow_local_buy_exception = (
+            is_flow
+            and local_continuation
+            and direction == "BUY"
+            and state == "TREND_UP"
+            and (bullish_structure or bullish_pattern)
+            and ExecutionGate._floatish(signal.get("multi_tf_alignment_score", 50.0), 50.0) >= 45
+            and ExecutionGate._floatish(signal.get("htf_exhaustion", 50.0), 50.0) < 80
+        )
+        flow_local_sell_exception = (
+            is_flow
+            and local_continuation
+            and direction == "SELL"
+            and state == "TREND_DOWN"
+            and (bearish_structure or bearish_pattern)
+            and ExecutionGate._floatish(signal.get("multi_tf_alignment_score", 50.0), 50.0) >= 45
+            and ExecutionGate._floatish(signal.get("htf_exhaustion", 50.0), 50.0) < 80
+        )
+
+        if htf_bias == "BULLISH" and direction == "SELL" and not (reversal_exception or flow_local_sell_exception):
             return False, "HTF_BULLISH_SELL_BLOCK"
-        if htf_bias == "BEARISH" and direction == "BUY" and not reversal_exception:
+        if htf_bias == "BEARISH" and direction == "BUY" and not (reversal_exception or flow_local_buy_exception):
             return False, "HTF_BEARISH_BUY_BLOCK"
         if state == "TREND_UP" and direction == "SELL" and not reversal_exception:
             return False, "TREND_UP_SELL_BLOCK"
         if state == "TREND_DOWN" and direction == "BUY" and not reversal_exception:
             return False, "TREND_DOWN_BUY_BLOCK"
+        close = ExecutionGate._floatish(signal.get("close", 0.0))
+        ema20 = ExecutionGate._floatish(signal.get("ema20", close), close)
+        slope = ExecutionGate._floatish(signal.get("slope", signal.get("ema_slope", 0.0)))
+        momentum = ExecutionGate._floatish(signal.get("momentum", 0.0))
+        bullish_local_tape = close > ema20 and (slope > 0 or momentum > 0)
+        bearish_local_tape = close < ema20 and (slope < 0 or momentum < 0)
+        if is_flow and direction == "SELL" and bullish_local_tape and not (bearish_pattern or reversal_exception):
+            return False, "FLOW_LOCAL_UPTAPE_SELL_BLOCK"
+        if is_flow and direction == "BUY" and bearish_local_tape and not (bullish_pattern or reversal_exception):
+            return False, "FLOW_LOCAL_DOWNTAPE_BUY_BLOCK"
         if direction == "BUY" and bearish_pattern and not (bullish_pattern or reversal_exception):
             return False, "BEARISH_CANDLE_BUY_BLOCK"
         if direction == "SELL" and bullish_pattern and not (bearish_pattern or reversal_exception):

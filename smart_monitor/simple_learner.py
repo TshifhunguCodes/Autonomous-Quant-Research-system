@@ -41,12 +41,11 @@ class SimpleTradeLearner:
     
     def train(self, force_retrain=False):
         """Train the model on realized closed trade outcomes."""
-        outcomes_path = Path("data/live/trade_outcomes.csv")
-        if not outcomes_path.exists():
+        df = self._load_realized_training_data()
+        if df.empty:
             return False
         
         try:
-            df = pd.read_csv(outcomes_path, parse_dates=['entry_time', 'signal_time', 'exit_time'], on_bad_lines='skip')
             flow_df = df[df['system'].astype(str).str.upper() == 'FLOW_EXP'].copy()
             
             if len(flow_df) < self.min_trades_for_learning:
@@ -72,6 +71,72 @@ class SimpleTradeLearner:
         except Exception as e:
             logger.error(f"Error training SimpleTradeLearner: {e}")
             return False
+
+    def _load_realized_training_data(self):
+        """Prefer broker-truth MT5 history, enriched with audit metadata when possible."""
+        broker_path = Path("data/live/mt5_system_trade_history.csv")
+        fallback_path = Path("data/live/trade_outcomes.csv")
+
+        if broker_path.exists():
+            try:
+                df = pd.read_csv(broker_path, parse_dates=['entry_time', 'exit_time'], on_bad_lines='skip')
+                if 'result' not in df.columns:
+                    return pd.DataFrame()
+                df = df[df['result'].astype(str).str.upper().isin(['WIN', 'LOSS', 'BREAKEVEN'])].copy()
+                df['pnl'] = pd.to_numeric(df.get('pnl', 0), errors='coerce').fillna(0.0)
+                if 'signal_time' not in df.columns:
+                    df['signal_time'] = df.get('entry_time')
+                df = self._enrich_broker_history_with_audit(df)
+                return df
+            except Exception as e:
+                logger.warning(f"Could not load broker MT5 history for learning: {e}")
+
+        if fallback_path.exists():
+            try:
+                return pd.read_csv(
+                    fallback_path,
+                    parse_dates=['entry_time', 'signal_time', 'exit_time'],
+                    on_bad_lines='skip',
+                )
+            except Exception as e:
+                logger.warning(f"Could not load fallback trade outcomes for learning: {e}")
+
+        return pd.DataFrame()
+
+    def _enrich_broker_history_with_audit(self, broker_df):
+        audit_path = Path("data/live/execution_audit.csv")
+        if not audit_path.exists() or broker_df.empty:
+            return broker_df
+        try:
+            audit = pd.read_csv(audit_path, on_bad_lines='skip')
+            if audit.empty:
+                return broker_df
+            for col in ['time', 'signal_time']:
+                if col in audit.columns:
+                    audit[col] = pd.to_datetime(audit[col], errors='coerce')
+            if 'deal_ticket' in audit.columns and 'entry_deal' in broker_df.columns:
+                audit['deal_ticket'] = pd.to_numeric(audit['deal_ticket'], errors='coerce')
+                broker_df['entry_deal'] = pd.to_numeric(broker_df['entry_deal'], errors='coerce')
+                keep_cols = [
+                    c for c in [
+                        'deal_ticket', 'signal_time', 'behavior_label', 'regime', 'structure_state',
+                        'alpha_score', 'flow_score', 'spread', 'slippage', 'setup'
+                    ]
+                    if c in audit.columns
+                ]
+                enriched = broker_df.merge(
+                    audit[keep_cols].dropna(subset=['deal_ticket']).drop_duplicates('deal_ticket', keep='last'),
+                    left_on='entry_deal',
+                    right_on='deal_ticket',
+                    how='left',
+                    suffixes=('', '_audit'),
+                )
+                if 'regime' in enriched.columns and 'market_regime' not in enriched.columns:
+                    enriched['market_regime'] = enriched['regime']
+                return enriched
+        except Exception as e:
+            logger.warning(f"Could not enrich broker history with audit metadata: {e}")
+        return broker_df
     
     def _extract_features_and_outcomes(self, df):
         """Extract features and outcomes from trade data"""

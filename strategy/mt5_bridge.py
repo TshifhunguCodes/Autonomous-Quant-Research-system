@@ -3,6 +3,7 @@ import pandas as pd
 from pathlib import Path
 import csv
 from core.logging_utils import get_logger
+from export_mt5_system_history import build_position_history, rows_from_mt5_tuples
 
 logger = get_logger(__name__)
 
@@ -27,6 +28,8 @@ AUDIT_COLUMNS = [
     "spread",
     "slippage",
     "retcode",
+    "order_ticket",
+    "deal_ticket",
     "pnl",
     "comment",
 ]
@@ -39,6 +42,7 @@ class MT5Bridge:
         
         self.audit_log_path = backtest_dir.parent / "live" / "execution_audit.csv"
         self.outcomes_log_path = backtest_dir.parent / "live" / "trade_outcomes.csv"
+        self.mt5_history_path = backtest_dir.parent / "live" / "mt5_system_trade_history.csv"
         self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
 
     def initialize_and_validate(self):
@@ -187,6 +191,7 @@ class MT5Bridge:
             return
 
         try:
+            self.export_system_trade_history(days=90)
             audit_df = self._read_audit_log()
             if audit_df.empty:
                 return
@@ -197,8 +202,12 @@ class MT5Bridge:
             executed = executed.dropna(subset=["time"])
 
             if self.outcomes_log_path.exists():
-                outcomes_df = pd.read_csv(self.outcomes_log_path, parse_dates=["entry_time"])
+                outcomes_df = pd.read_csv(self.outcomes_log_path, parse_dates=["entry_time"], on_bad_lines="skip")
                 executed = executed[~executed["time"].isin(outcomes_df["entry_time"])]
+                if "entry_deal" in outcomes_df.columns and "deal_ticket" in executed.columns:
+                    used_deals = set(pd.to_numeric(outcomes_df["entry_deal"], errors="coerce").dropna().astype("int64"))
+                    deal_tickets = pd.to_numeric(executed["deal_ticket"], errors="coerce")
+                    executed = executed[~deal_tickets.isin(used_deals)]
 
             if executed.empty:
                 return
@@ -218,10 +227,26 @@ class MT5Bridge:
             deals_df["time"] = pd.to_datetime(deals_df["time"], unit="s")
 
             new_outcomes = []
+            used_entry_deals = set()
+            if self.outcomes_log_path.exists():
+                try:
+                    prior = pd.read_csv(self.outcomes_log_path, usecols=["entry_deal"], on_bad_lines="skip")
+                    used_entry_deals.update(pd.to_numeric(prior["entry_deal"], errors="coerce").dropna().astype("int64").tolist())
+                except Exception:
+                    pass
+
             for _, trade in executed.iterrows():
                 outcome = self._match_closed_trade(trade, deals_df)
                 if outcome is None:
                     continue
+                try:
+                    entry_deal_key = int(outcome["entry_deal"])
+                except (TypeError, ValueError):
+                    entry_deal_key = None
+                if entry_deal_key is not None and entry_deal_key in used_entry_deals:
+                    continue
+                if entry_deal_key is not None:
+                    used_entry_deals.add(entry_deal_key)
 
                 new_outcomes.append({
                     "entry_time": trade["time"],
@@ -267,6 +292,30 @@ class MT5Bridge:
         except Exception as e:
             logger.error("Error syncing closed trades: %s", e)
 
+    def export_system_trade_history(self, days=90):
+        """Refresh broker-truth AQRS trade history from MT5 into a clean CSV."""
+        try:
+            from_date = pd.Timestamp.now() - pd.Timedelta(days=days)
+            to_date = pd.Timestamp.now()
+            deals = mt5.history_deals_get(from_date.to_pydatetime(), to_date.to_pydatetime())
+            deals_df = rows_from_mt5_tuples(deals)
+            if deals_df.empty:
+                return pd.DataFrame()
+
+            symbol = str(getattr(self.config.market, "symbol", ""))
+            if symbol and "symbol" in deals_df.columns:
+                deals_df = deals_df[deals_df["symbol"].astype(str).eq(symbol)]
+
+            magic = int(getattr(self.config.market, "magic_number", 202404))
+            history = build_position_history(deals_df, magic=magic, comment_prefix="AQ_")
+            self.mt5_history_path.parent.mkdir(parents=True, exist_ok=True)
+            history.to_csv(self.mt5_history_path, index=False)
+            logger.info("MT5 system trade history refreshed: %d rows", len(history))
+            return history
+        except Exception as e:
+            logger.warning("MT5 system trade history export failed: %s", e)
+            return pd.DataFrame()
+
     def _read_audit_log(self):
         """Read old and new execution_audit rows without dropping mixed-schema entries."""
         if not self.audit_log_path.exists():
@@ -302,15 +351,20 @@ class MT5Bridge:
         candidates = deals_df[deals_df["time"] >= entry_time - pd.Timedelta(minutes=10)].copy()
         if "symbol" in candidates.columns:
             candidates = candidates[candidates["symbol"].astype(str) == symbol]
-        if "comment" in candidates.columns and comment:
-            comment_matches = candidates[candidates["comment"].astype(str) == comment]
-            if not comment_matches.empty:
-                candidates = comment_matches
 
         entry_code = getattr(mt5, "DEAL_ENTRY_IN", 0)
         exit_code = getattr(mt5, "DEAL_ENTRY_OUT", 1)
         entry_col = candidates["entry"] if "entry" in candidates.columns else pd.Series(dtype=int)
         entry_deals = candidates[entry_col == entry_code].copy()
+        exact_deal = pd.to_numeric(pd.Series([trade.get("deal_ticket", None)]), errors="coerce").iloc[0]
+        if pd.notna(exact_deal):
+            exact_match = entry_deals[pd.to_numeric(entry_deals.get("ticket"), errors="coerce") == int(exact_deal)]
+            if not exact_match.empty:
+                entry_deals = exact_match
+        elif "comment" in candidates.columns and comment:
+            comment_matches = entry_deals[entry_deals["comment"].astype(str) == comment]
+            if not comment_matches.empty:
+                entry_deals = comment_matches
         if entry_deals.empty:
             return None
 
@@ -371,6 +425,8 @@ class MT5Bridge:
             "spread": metadata.get("spread", 0),
             "slippage": abs(request["price"] - metadata.get("entry_price", request["price"])),
             "retcode": result.retcode,
+            "order_ticket": getattr(result, "order", 0),
+            "deal_ticket": getattr(result, "deal", 0),
             "pnl": 0.0,
             "comment": request["comment"]
         }
@@ -414,6 +470,8 @@ class MT5Bridge:
             "spread": metadata.get("spread", 0) / self.config.market.point_size, # Convert to points for logging
             "slippage": 0,
             "retcode": reason,
+            "order_ticket": 0,
+            "deal_ticket": 0,
             "pnl": 0.0,
             "comment": ""
         }

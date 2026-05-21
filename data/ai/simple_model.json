@@ -1,0 +1,16 @@
+{
+  "feature_weights": {
+    "confluence_count": 0.11228324716959258,
+    "htf_alignment": 0.11228324716959258,
+    "momentum_score": 0.11228324716959258,
+    "volume_ratio": 0.11228324716959258,
+    "spread_quality": 0.11228324716959258,
+    "confirm_score": 0.11228324716959258,
+    "structure_score": 0.11228324716959258,
+    "hour_quality": 0.1017340226432593,
+    "regime_suitability": 0.11228324716959258
+  },
+  "last_trained": "2026-05-21T17:37:29.808367",
+  "trained": true,
+  "version": "1.0"
+}

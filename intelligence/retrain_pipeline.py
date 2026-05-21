@@ -19,7 +19,8 @@ class RetrainPipeline:
 
     def __init__(self, config=None):
         self.config = config
-        self.outcomes_path = Path("data/live/trade_outcomes.csv")
+        self.outcomes_path = Path("data/live/mt5_system_trade_history.csv")
+        self.fallback_outcomes_path = Path("data/live/trade_outcomes.csv")
         self.retrain_marker_path = Path("intelligence/models/last_retrain.txt")
 
         self.retrain_threshold = 50
@@ -49,15 +50,30 @@ class RetrainPipeline:
 
     def check_and_retrain(self, pipeline_df: pd.DataFrame = None) -> dict:
         """Retrain when enough new closed outcomes have accumulated."""
-        if not self.outcomes_path.exists():
+        outcomes_path = self.outcomes_path if self.outcomes_path.exists() else self.fallback_outcomes_path
+        if not outcomes_path.exists():
             return {"retrained": False, "reason": "no_outcomes_file", "trades": 0}
 
         try:
-            outcomes_df = pd.read_csv(self.outcomes_path, parse_dates=["entry_time"], on_bad_lines="skip")
+            outcomes_df = pd.read_csv(outcomes_path, parse_dates=["entry_time"], on_bad_lines="skip")
+            if "result" in outcomes_df.columns:
+                outcomes_df = outcomes_df[
+                    outcomes_df["result"].astype(str).str.upper().isin(["WIN", "LOSS", "BREAKEVEN"])
+                ].copy()
+            outcomes_df = self._enrich_outcomes_with_audit(outcomes_df)
             total_trades = len(outcomes_df)
         except Exception as e:
             logger.warning("Could not read outcomes file: %s", e)
             return {"retrained": False, "reason": f"read_error: {e}", "trades": 0}
+
+        if total_trades < self.last_retrain_count:
+            logger.info(
+                "Retrain marker reset because outcome source has fewer rows (%d < %d)",
+                total_trades,
+                self.last_retrain_count,
+            )
+            self.last_retrain_count = 0
+            self._save_marker()
 
         new_trades = total_trades - self.last_retrain_count
         if new_trades < self.retrain_threshold:
@@ -143,11 +159,17 @@ class RetrainPipeline:
 
     def force_retrain(self, pipeline_df: pd.DataFrame) -> dict:
         """Force retrain all models regardless of threshold."""
-        if not self.outcomes_path.exists():
+        outcomes_path = self.outcomes_path if self.outcomes_path.exists() else self.fallback_outcomes_path
+        if not outcomes_path.exists():
             outcomes_df = pd.DataFrame()
         else:
             try:
-                outcomes_df = pd.read_csv(self.outcomes_path, parse_dates=["entry_time"], on_bad_lines="skip")
+                outcomes_df = pd.read_csv(outcomes_path, parse_dates=["entry_time"], on_bad_lines="skip")
+                if "result" in outcomes_df.columns:
+                    outcomes_df = outcomes_df[
+                        outcomes_df["result"].astype(str).str.upper().isin(["WIN", "LOSS", "BREAKEVEN"])
+                    ].copy()
+                outcomes_df = self._enrich_outcomes_with_audit(outcomes_df)
             except Exception:
                 outcomes_df = pd.DataFrame()
 
@@ -189,13 +211,16 @@ class RetrainPipeline:
     def get_status(self) -> dict:
         """Get retraining pipeline status."""
         total = 0
-        if self.outcomes_path.exists():
+        outcomes_path = self.outcomes_path if self.outcomes_path.exists() else self.fallback_outcomes_path
+        if outcomes_path.exists():
             try:
-                total = len(pd.read_csv(self.outcomes_path, on_bad_lines="skip"))
+                total = len(pd.read_csv(outcomes_path, on_bad_lines="skip"))
             except Exception:
                 pass
 
         new_since = total - self.last_retrain_count
+        if new_since < 0:
+            new_since = total
         return {
             "total_trades": total,
             "last_retrain_count": self.last_retrain_count,
@@ -205,3 +230,45 @@ class RetrainPipeline:
             "total_retrains": self.total_retrains,
             "last_retrain_time": self.last_retrain_time.isoformat() if self.last_retrain_time else "never",
         }
+
+    def _enrich_outcomes_with_audit(self, outcomes_df: pd.DataFrame) -> pd.DataFrame:
+        """Attach signal metadata from execution audit when broker history is the source."""
+        audit_path = Path("data/live/execution_audit.csv")
+        if outcomes_df.empty or not audit_path.exists() or "entry_deal" not in outcomes_df.columns:
+            return outcomes_df
+        try:
+            audit = pd.read_csv(audit_path, on_bad_lines="skip")
+            if audit.empty or "deal_ticket" not in audit.columns:
+                return outcomes_df
+            audit["deal_ticket"] = pd.to_numeric(audit["deal_ticket"], errors="coerce")
+            outcomes_df["entry_deal"] = pd.to_numeric(outcomes_df["entry_deal"], errors="coerce")
+            keep_cols = [
+                c for c in [
+                    "deal_ticket",
+                    "signal_time",
+                    "behavior_label",
+                    "regime",
+                    "structure_state",
+                    "alpha_score",
+                    "flow_score",
+                    "spread",
+                    "slippage",
+                    "setup",
+                ]
+                if c in audit.columns
+            ]
+            enriched = outcomes_df.merge(
+                audit[keep_cols].dropna(subset=["deal_ticket"]).drop_duplicates("deal_ticket", keep="last"),
+                left_on="entry_deal",
+                right_on="deal_ticket",
+                how="left",
+                suffixes=("", "_audit"),
+            )
+            if "regime" in enriched.columns and "market_regime" not in enriched.columns:
+                enriched["market_regime"] = enriched["regime"]
+            if "signal_time_audit" in enriched.columns:
+                enriched["signal_time"] = enriched["signal_time_audit"].combine_first(enriched.get("signal_time"))
+            return enriched
+        except Exception as e:
+            logger.warning("Could not enrich outcomes with audit metadata: %s", e)
+            return outcomes_df
