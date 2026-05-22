@@ -40,7 +40,35 @@ class FlowSystem:
             & out.get("bearish_reversal", pd.Series(0, index=out.index)).eq(1),
             "flow_direction",
         ] = "SHORT"
+        story_direction = out.get("story_direction", pd.Series("NEUTRAL", index=out.index)).replace("", "NEUTRAL")
+        story_signal = out.get("market_story", pd.Series("NEUTRAL", index=out.index)).astype(str)
+        out.loc[
+            out["flow_direction"].isna()
+            & story_direction.eq("LONG")
+            & story_signal.str.contains("RETEST|CONTINUATION|REVERSAL|TRIPLE_BOTTOM|MOMENTUM_BREAKOUT", regex=True),
+            "flow_direction",
+        ] = "LONG"
+        out.loc[
+            out["flow_direction"].isna()
+            & story_direction.eq("SHORT")
+            & story_signal.str.contains("RETEST|CONTINUATION|REVERSAL|TRIPLE_TOP|MOMENTUM_BREAKOUT", regex=True),
+            "flow_direction",
+        ] = "SHORT"
+        strong_story = out.get("story_confidence", pd.Series(0.0, index=out.index)).ge(70) & story_signal.str.contains(
+            "RETEST_REJECTION|REVERSAL_FROM_ZONE|TRIPLE", regex=True
+        )
+        out.loc[strong_story & story_direction.eq("LONG"), "flow_direction"] = "LONG"
+        out.loc[strong_story & story_direction.eq("SHORT"), "flow_direction"] = "SHORT"
         out["flow_direction"] = out["flow_direction"].fillna("NEUTRAL")
+
+        story_reversal = story_signal.str.contains("RETEST_REJECTION|REVERSAL_FROM_ZONE|TRIPLE", regex=True)
+        story_continuation = story_signal.str.contains("RETEST_ZONE|CONTINUATION|MOMENTUM_BREAKOUT", regex=True)
+        out.loc[story_reversal & out["flow_trade_type"].eq("NONE"), "flow_trade_type"] = "ZONE_REVERSAL_REJECTION"
+        out.loc[story_continuation & out["flow_trade_type"].eq("NONE"), "flow_trade_type"] = "STRUCTURE_RETEST_CONTINUATION"
+        out.loc[story_reversal, "flow_counter_trend_allowed"] = 1
+        out.loc[story_reversal, "flow_atr_sl_multiplier"] = 0.5
+        out.loc[story_continuation, "flow_atr_sl_multiplier"] = 0.45
+        out.loc[story_reversal | story_continuation, "flow_rr_ratio"] = 2.0
 
         out["flow_score"] = 10
         out.loc[out["behavior_label"].isin(["RANGE", "BREAKOUT", "REVERSAL"]), "flow_score"] += 18
@@ -58,10 +86,20 @@ class FlowSystem:
         out.loc[out.get("breakout_quality", pd.Series(50.0, index=out.index)) >= 70, "flow_score"] += 8
         out.loc[out.get("continuation_strength", pd.Series(50.0, index=out.index)) >= 70, "flow_score"] += 6
         out.loc[out.get("liquidity_event", pd.Series("NONE", index=out.index)) == "CONFIRMED_SWEEP_REJECTION", "flow_score"] += 8
+        out.loc[out["flow_trade_type"].eq("DEEP_PULLBACK_SCALP"), "flow_score"] += 12
+        out.loc[out.get("market_story", pd.Series("NEUTRAL", index=out.index)).astype(str).str.contains("RETEST_REJECTION|REVERSAL_FROM_ZONE|TRIPLE", regex=True), "flow_score"] += 14
+        out.loc[out.get("market_story", pd.Series("NEUTRAL", index=out.index)).astype(str).str.contains("CONTINUATION|MOMENTUM_BREAKOUT", regex=True), "flow_score"] += 8
+        out.loc[out.get("story_confidence", pd.Series(0.0, index=out.index)).ge(70), "flow_score"] += 8
         out.loc[out["flow_direction"].eq("LONG") & out.get("bullish_pattern_score", pd.Series(0, index=out.index)).gt(0), "flow_score"] += 8
         out.loc[out["flow_direction"].eq("SHORT") & out.get("bearish_pattern_score", pd.Series(0, index=out.index)).gt(0), "flow_score"] += 8
         out.loc[out["flow_direction"].eq("LONG") & out.get("bearish_reversal", pd.Series(0, index=out.index)).eq(1), "flow_score"] -= 15
         out.loc[out["flow_direction"].eq("SHORT") & out.get("bullish_reversal", pd.Series(0, index=out.index)).eq(1), "flow_score"] -= 15
+
+        out = self._add_indicator_confirmation(out)
+        out.loc[out["flow_indicator_confirmations"] >= 3, "flow_score"] += 10
+        out.loc[out["flow_indicator_confirmations"] >= 4, "flow_score"] += 5
+        out.loc[out["flow_indicator_conflict"].eq(1), "flow_score"] -= 25
+
         out.loc[out.get("fake_breakout", pd.Series(0, index=out.index)) == 1, "flow_score"] -= 35
         out.loc[out.get("trap_probability", pd.Series(0.0, index=out.index)) >= 70, "flow_score"] -= 20
         out.loc[out.get("htf_exhaustion", pd.Series(50.0, index=out.index)) >= 60, "flow_score"] -= 18
@@ -95,7 +133,21 @@ class FlowSystem:
                 | out["counter_trend_decision"].eq("ALLOWED")
             )
         )
-        flow_allowed = base_flow_allowed | framework_allowed
+        story_allowed = (
+            out.get("story_confidence", pd.Series(0.0, index=out.index)).ge(70)
+            & out["flow_direction"].isin(["LONG", "SHORT"])
+            & out.get("market_story", pd.Series("NEUTRAL", index=out.index)).astype(str).str.contains("RETEST_REJECTION|REVERSAL_FROM_ZONE|TRIPLE|CONTINUATION", regex=True)
+            & (out.get("fake_breakout", pd.Series(0, index=out.index)) == 0)
+            & (out.get("trap_probability", pd.Series(0.0, index=out.index)) < 75)
+        )
+        flow_allowed = base_flow_allowed | framework_allowed | story_allowed
+
+        continuation_flow = out["flow_trade_type"].isin(["NONE", "MOMENTUM_CONTINUATION", "MICRO_RETRACEMENT_REENTRY", "STRUCTURE_RETEST_CONTINUATION"])
+        flow_allowed &= ~out["flow_indicator_conflict"].eq(1)
+        flow_allowed &= (
+            (out["flow_indicator_score"] >= 40)
+            | (~continuation_flow & out.get("confirmed_reversal", pd.Series(0, index=out.index)).eq(1))
+        )
 
         counter_trend_against_m5 = (
             (out["behavior_label"].eq("TREND_UP") & out["flow_direction"].eq("SHORT"))
@@ -108,6 +160,7 @@ class FlowSystem:
                 & ~out["counter_trend_decision"].eq("ALLOWED")
             )
         )
+        counter_trend_without_reversal &= ~out["flow_trade_type"].isin(["DEEP_PULLBACK_SCALP", "ZONE_REVERSAL_REJECTION"])
         flow_allowed &= ~counter_trend_without_reversal
 
         out["flow_signal"] = np.where(flow_allowed, "FLOW", "")
@@ -198,9 +251,19 @@ class FlowSystem:
             & retracement.between(50.0, 78.6, inclusive="both")
             & ((trend_up & bearish_rejection) | (trend_down & bullish_rejection))
         )
+        deep_pullback_scalp = (
+            trend
+            & retracement.between(50.0, 78.6, inclusive="both")
+            & (
+                (trend_down & (bullish_rejection | bullish_engulf) & rsi14.between(25.0, 65.0, inclusive="both"))
+                | (trend_up & (bearish_rejection | bearish_engulf) & rsi14.between(35.0, 75.0, inclusive="both"))
+            )
+            & volume_confirm
+        )
 
         self._assign_setup(out, momentum_continuation, "MOMENTUM_CONTINUATION", trend_up, trend_down, 0.5, 2.0, False)
         self._assign_setup(out, reentry & out["flow_trade_type"].eq("NONE"), "MICRO_RETRACEMENT_REENTRY", trend_up, trend_down, 0.4, 2.0, False)
+        self._assign_setup(out, deep_pullback_scalp & out["flow_trade_type"].eq("NONE"), "DEEP_PULLBACK_SCALP", trend_down, trend_up, 0.45, 1.5, True)
         self._assign_setup(out, exhaustion_fade & out["flow_trade_type"].eq("NONE"), "EXHAUSTION_FADE", trend_down, trend_up, 0.3, 2.0, True)
         self._assign_setup(out, early_reversal & out["flow_trade_type"].eq("NONE"), "EARLY_REVERSAL_ENTRY", trend_down, trend_up, 0.6, 2.0, True)
         return out
@@ -236,4 +299,51 @@ class FlowSystem:
         out.loc[out["pattern"] == "CHOCH", "experiment_score"] += 15
         out.loc[out["pattern"].isin(["DOUBLE_TOP", "DOUBLE_BOTTOM"]), "experiment_score"] += 10
         out.loc[out["fvg_zone"] == 1, "experiment_score"] += 8
+        return out
+
+    def _add_indicator_confirmation(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        index = out.index
+
+        close = out.get("close", pd.Series(0.0, index=index))
+        macd_hist = out.get("macd_histogram", pd.Series(0.0, index=index)).fillna(0.0)
+        macd_slope = out.get("macd_slope", pd.Series(0.0, index=index)).fillna(0.0)
+        plus_di = out.get("adx_plus_di", pd.Series(0.0, index=index)).fillna(0.0)
+        minus_di = out.get("adx_minus_di", pd.Series(0.0, index=index)).fillna(0.0)
+        adx = out.get("adx", pd.Series(0.0, index=index)).fillna(0.0)
+        stoch_k = out.get("stoch_k", pd.Series(50.0, index=index)).fillna(50.0)
+        stoch_d = out.get("stoch_d", pd.Series(50.0, index=index)).fillna(50.0)
+        bb_middle = out.get("bb_middle", close).fillna(close)
+
+        bull_count = (
+            macd_hist.gt(0).astype(int)
+            + macd_slope.gt(0).astype(int)
+            + (plus_di.gt(minus_di) & adx.ge(15)).astype(int)
+            + stoch_k.ge(stoch_d).astype(int)
+            + close.ge(bb_middle).astype(int)
+        )
+        bear_count = (
+            macd_hist.lt(0).astype(int)
+            + macd_slope.lt(0).astype(int)
+            + (minus_di.gt(plus_di) & adx.ge(15)).astype(int)
+            + stoch_k.le(stoch_d).astype(int)
+            + close.le(bb_middle).astype(int)
+        )
+
+        out["flow_bull_indicator_confirmations"] = bull_count
+        out["flow_bear_indicator_confirmations"] = bear_count
+        out["flow_indicator_confirmations"] = np.select(
+            [out["flow_direction"].eq("LONG"), out["flow_direction"].eq("SHORT")],
+            [bull_count, bear_count],
+            default=0,
+        )
+        out["flow_indicator_score"] = (out["flow_indicator_confirmations"] * 20).clip(lower=0, upper=100)
+        out["flow_indicator_conflict"] = np.select(
+            [
+                out["flow_direction"].eq("LONG") & bear_count.ge(4) & bull_count.le(2),
+                out["flow_direction"].eq("SHORT") & bull_count.ge(4) & bear_count.le(2),
+            ],
+            [1, 1],
+            default=0,
+        )
         return out

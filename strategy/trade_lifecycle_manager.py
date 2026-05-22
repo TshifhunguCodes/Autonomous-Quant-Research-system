@@ -122,7 +122,8 @@ class TradeLifecycleManager:
 
     @staticmethod
     def manage_open_positions(config: Any, signal: dict[str, Any], symbol_info: Any, tick: Any) -> list[dict[str, Any]]:
-        positions = mt5.positions_get(symbol=config.market.symbol) or []
+        positions = mt5.positions_get(symbol=signal.get("symbol", config.market.symbol)) or []
+        positions = TradeLifecycleManager._system_positions(config, positions)
         if not positions:
             return []
 
@@ -181,6 +182,7 @@ class TradeLifecycleManager:
     @staticmethod
     def can_stack(signal: dict[str, Any], tick: Any) -> bool:
         positions = mt5.positions_get(symbol=signal.get("symbol")) or []
+        positions = [p for p in positions if TradeLifecycleManager._signal_system_position(signal, p)]
         if not positions:
             return True
         for position in positions:
@@ -188,6 +190,29 @@ class TradeLifecycleManager:
             if state != TradeLifecycleManager.SCALE_ALLOWED:
                 return False
         return True
+
+    @staticmethod
+    def _signal_system_position(signal: dict[str, Any], position: Any) -> bool:
+        comment = str(getattr(position, "comment", "") or "").upper()
+        try:
+            magic_match = int(getattr(position, "magic", 0) or 0) == int(signal.get("magic_number", 202404) or 202404)
+        except (TypeError, ValueError):
+            magic_match = False
+        return comment.startswith("AQ_") or magic_match
+
+    @staticmethod
+    def _system_positions(config: Any, positions: Any) -> list[Any]:
+        system_magic = int(getattr(config.market, "magic_number", 202404))
+        filtered = []
+        for position in positions:
+            comment = str(getattr(position, "comment", "") or "").upper()
+            try:
+                magic_match = int(getattr(position, "magic", 0) or 0) == system_magic
+            except (TypeError, ValueError):
+                magic_match = False
+            if comment.startswith("AQ_") or magic_match:
+                filtered.append(position)
+        return filtered
 
     @staticmethod
     def _move_to_break_even(position: Any, symbol_info: Any, tick: Any) -> bool:

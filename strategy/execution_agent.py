@@ -343,13 +343,27 @@ def _flow_sl_multiplier(flow_type):
     return {
         "EXHAUSTION_FADE": 0.3,
         "MICRO_RETRACEMENT_REENTRY": 0.4,
+        "DEEP_PULLBACK_SCALP": 0.45,
+        "STRUCTURE_RETEST_CONTINUATION": 0.45,
+        "ZONE_REVERSAL_REJECTION": 0.5,
         "MOMENTUM_CONTINUATION": 0.5,
         "EARLY_REVERSAL_ENTRY": 0.6,
     }.get(str(flow_type), 0.5)
 
 
 def _flow_position_limits_ok(config, signal):
-    positions = mt5.positions_get(symbol=config.market.symbol) or []
+    positions = mt5.positions_get(symbol=signal.get("symbol", config.market.symbol)) or []
+    system_magic = int(getattr(config.market, "magic_number", 202404))
+    filtered_positions = []
+    for position in positions:
+        comment = str(getattr(position, "comment", "") or "").upper()
+        try:
+            magic_match = int(getattr(position, "magic", 0) or 0) == system_magic
+        except (TypeError, ValueError):
+            magic_match = False
+        if comment.startswith("AQ_") or magic_match:
+            filtered_positions.append(position)
+    positions = filtered_positions
     flow_positions = [p for p in positions if "FLOW_EXP" in str(getattr(p, "comment", ""))]
     alpha_positions = [p for p in positions if "ALPHA" in str(getattr(p, "comment", ""))]
     alpha_in_drawdown = any(float(getattr(p, "profit", 0.0) or 0.0) < 0 for p in alpha_positions)
@@ -373,6 +387,9 @@ def _build_order_comment(system, signal):
     flow_code = {
         "MOMENTUM_CONTINUATION": "MOM",
         "MICRO_RETRACEMENT_REENTRY": "REENT",
+        "DEEP_PULLBACK_SCALP": "DPB",
+        "STRUCTURE_RETEST_CONTINUATION": "SRT",
+        "ZONE_REVERSAL_REJECTION": "ZRR",
         "EXHAUSTION_FADE": "EXH",
         "EARLY_REVERSAL_ENTRY": "REV",
     }.get(str(signal.get("flow_trade_type", "FLOW")), "FLOW")

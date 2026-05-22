@@ -103,6 +103,7 @@ class PriceActionStructureEngine:
         out.loc[out["break_retest"] == 1, "pattern"] = "BREAK_RETEST"
         out.loc[(out["choch"] == 1) & (out["pattern"] == "NONE"), "pattern"] = "CHOCH"
         out = self._classify_retracement(out)
+        out = self._classify_market_story(out)
         return out
 
     def identify_pattern(self, row: pd.Series) -> str:
@@ -180,4 +181,124 @@ class PriceActionStructureEngine:
             | (trend_down_mask & (out["retracement_class"] == "DEEP_CONTINUATION") & (out["lower_high_holding"] == 0)),
             "retracement_trade_allowed",
         ] = 0
+        return out
+
+    def _classify_market_story(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        index = out.index
+
+        atr = out.get("atr", out["range"].rolling(14, min_periods=1).mean()).fillna(out["range"].rolling(14, min_periods=1).mean())
+        avg_range = out["range"].rolling(20, min_periods=1).mean()
+        tolerance = (atr * 0.25).fillna(avg_range * 0.5).clip(lower=avg_range * 0.2)
+
+        out["broken_structure_level"] = np.nan
+        out.loc[out["bos_up"].eq(1), "broken_structure_level"] = out["prev_swing_high"]
+        out.loc[out["bos_down"].eq(1), "broken_structure_level"] = out["prev_swing_low"]
+        out["last_broken_high"] = out["prev_swing_high"].where(out["bos_up"].eq(1), np.nan).ffill()
+        out["last_broken_low"] = out["prev_swing_low"].where(out["bos_down"].eq(1), np.nan).ffill()
+        out["last_break_direction"] = np.select(
+            [out["bos_up"].eq(1), out["bos_down"].eq(1)],
+            ["UP", "DOWN"],
+            default="NONE",
+        )
+        out["last_break_direction"] = pd.Series(out["last_break_direction"], index=index).replace("NONE", np.nan).ffill().fillna("NONE")
+
+        bos_seen = out["bos"].eq(1)
+        out["bars_since_bos"] = bos_seen.groupby(bos_seen.cumsum()).cumcount()
+        out.loc[~bos_seen.cumsum().astype(bool), "bars_since_bos"] = 999
+
+        body = (out["close"] - out["open"]).abs()
+        upper_wick = out["high"] - out[["open", "close"]].max(axis=1)
+        lower_wick = out[["open", "close"]].min(axis=1) - out["low"]
+        bullish_candle = out["close"] > out["open"]
+        bearish_candle = out["close"] < out["open"]
+        bullish_rejection = bullish_candle & (lower_wick >= body * 0.8)
+        bearish_rejection = bearish_candle & (upper_wick >= body * 0.8)
+
+        out["retest_broken_high"] = (
+            out["last_broken_high"].notna()
+            & out["low"].le(out["last_broken_high"] + tolerance)
+            & out["close"].ge(out["last_broken_high"] - tolerance)
+            & out["bars_since_bos"].between(1, 30, inclusive="both")
+        ).astype(int)
+        out["retest_broken_low"] = (
+            out["last_broken_low"].notna()
+            & out["high"].ge(out["last_broken_low"] - tolerance)
+            & out["close"].le(out["last_broken_low"] + tolerance)
+            & out["bars_since_bos"].between(1, 30, inclusive="both")
+        ).astype(int)
+
+        out["bullish_zone_rejection"] = (
+            bullish_rejection
+            & (
+                out["retest_broken_high"].eq(1)
+                | out.get("demand_zone", pd.Series(0, index=index)).eq(1)
+                | out.get("is_support", pd.Series(0, index=index)).eq(1)
+                | out.get("order_block", pd.Series(0, index=index)).eq(1)
+                | out.get("fvg_zone", pd.Series(0, index=index)).eq(1)
+            )
+        ).astype(int)
+        out["bearish_zone_rejection"] = (
+            bearish_rejection
+            & (
+                out["retest_broken_low"].eq(1)
+                | out.get("supply_zone", pd.Series(0, index=index)).eq(1)
+                | out.get("is_resistance", pd.Series(0, index=index)).eq(1)
+                | out.get("order_block", pd.Series(0, index=index)).eq(1)
+                | out.get("fvg_zone", pd.Series(0, index=index)).eq(1)
+            )
+        ).astype(int)
+
+        displacement = (body >= atr * 1.2) | (out.get("tick_volume", pd.Series(0, index=index)) >= out.get("tick_volume", pd.Series(0, index=index)).rolling(20, min_periods=1).mean() * 1.25)
+        out["momentum_breakout"] = ((out["bos"].eq(1)) & displacement).astype(int)
+        out["breakout_follow_through"] = (
+            (
+                out["last_break_direction"].eq("UP")
+                & out["close"].gt(out["last_broken_high"] + tolerance)
+                & out["bars_since_bos"].between(1, 8, inclusive="both")
+            )
+            | (
+                out["last_break_direction"].eq("DOWN")
+                & out["close"].lt(out["last_broken_low"] - tolerance)
+                & out["bars_since_bos"].between(1, 8, inclusive="both")
+            )
+        ).astype(int)
+
+        swing_tolerance = avg_range * 0.35
+        out["triple_top"] = (
+            out["double_top"].eq(1)
+            & out["swing_high"].rolling(20, min_periods=1).sum().ge(3)
+            & out["high"].sub(out["prev_swing_high"]).abs().le(swing_tolerance)
+        ).astype(int)
+        out["triple_bottom"] = (
+            out["double_bottom"].eq(1)
+            & out["swing_low"].rolling(20, min_periods=1).sum().ge(3)
+            & out["low"].sub(out["prev_swing_low"]).abs().le(swing_tolerance)
+        ).astype(int)
+
+        out["market_story"] = "NEUTRAL"
+        out.loc[out["momentum_breakout"].eq(1) & out["bos_up"].eq(1), "market_story"] = "BULLISH_MOMENTUM_BREAKOUT"
+        out.loc[out["momentum_breakout"].eq(1) & out["bos_down"].eq(1), "market_story"] = "BEARISH_MOMENTUM_BREAKOUT"
+        out.loc[out["breakout_follow_through"].eq(1) & out["last_break_direction"].eq("UP"), "market_story"] = "BULLISH_CONTINUATION"
+        out.loc[out["breakout_follow_through"].eq(1) & out["last_break_direction"].eq("DOWN"), "market_story"] = "BEARISH_CONTINUATION"
+        out.loc[out["retest_broken_high"].eq(1), "market_story"] = "BULLISH_RETEST_ZONE"
+        out.loc[out["retest_broken_low"].eq(1), "market_story"] = "BEARISH_RETEST_ZONE"
+        out.loc[out["bullish_zone_rejection"].eq(1), "market_story"] = "BULLISH_RETEST_REJECTION"
+        out.loc[out["bearish_zone_rejection"].eq(1), "market_story"] = "BEARISH_RETEST_REJECTION"
+        out.loc[out["choch"].eq(1) & out["bullish_zone_rejection"].eq(1), "market_story"] = "BULLISH_REVERSAL_FROM_ZONE"
+        out.loc[out["choch"].eq(1) & out["bearish_zone_rejection"].eq(1), "market_story"] = "BEARISH_REVERSAL_FROM_ZONE"
+        out.loc[out["triple_top"].eq(1), "market_story"] = "BEARISH_TRIPLE_TOP_REVERSAL"
+        out.loc[out["triple_bottom"].eq(1), "market_story"] = "BULLISH_TRIPLE_BOTTOM_REVERSAL"
+
+        out["story_direction"] = "NEUTRAL"
+        out.loc[out["market_story"].str.startswith("BULLISH"), "story_direction"] = "LONG"
+        out.loc[out["market_story"].str.startswith("BEARISH"), "story_direction"] = "SHORT"
+        out["story_confidence"] = 0.0
+        out.loc[out["market_story"].str.contains("MOMENTUM_BREAKOUT|CONTINUATION", regex=True), "story_confidence"] += 45
+        out.loc[out["market_story"].str.contains("RETEST_ZONE", regex=True), "story_confidence"] += 55
+        out.loc[out["market_story"].str.contains("REJECTION|REVERSAL|TRIPLE", regex=True), "story_confidence"] += 70
+        out.loc[out.get("order_block", pd.Series(0, index=index)).eq(1), "story_confidence"] += 8
+        out.loc[out.get("fvg_zone", pd.Series(0, index=index)).eq(1), "story_confidence"] += 8
+        out.loc[out["bos"].eq(1) | out["choch"].eq(1), "story_confidence"] += 10
+        out["story_confidence"] = out["story_confidence"].clip(lower=0.0, upper=100.0)
         return out

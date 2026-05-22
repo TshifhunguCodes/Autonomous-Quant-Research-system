@@ -41,6 +41,9 @@ class AdaptiveFilter:
         
         # Performance tracking per regime
         self.regime_performance = {}  # {regime: {"wins": N, "losses": N, "total": N}}
+        self.broker_history_path = Path("data/live/mt5_system_trade_history.csv")
+        self._broker_history_cache = None
+        self._broker_history_mtime = None
     
     @property
     def regime_detector(self):
@@ -101,6 +104,13 @@ class AdaptiveFilter:
         
         if perf_check["blocked"]:
             reasons.append(perf_check["reason"])
+
+        # ====== FILTER 5: Broker-Realized Context Performance ======
+        broker_check = self._check_broker_context_performance(signal_row)
+        details["broker_context_performance"] = broker_check
+
+        if broker_check["blocked"]:
+            reasons.append(broker_check["reason"])
         
         # ====== FINAL VERDICT ======
         allowed = len(reasons) == 0
@@ -204,6 +214,127 @@ class AdaptiveFilter:
             "blocked": blocked,
             "reason": reason,
         }
+
+    def _check_broker_context_performance(self, signal_row: dict) -> dict:
+        """Use realized MT5 history to block contexts that keep losing live money."""
+        history = self._load_broker_history()
+        if history.empty:
+            return {
+                "sample": 0,
+                "win_rate": None,
+                "expectancy": None,
+                "blocked": False,
+                "reason": "broker_history_unavailable",
+            }
+
+        system = self._signal_system(signal_row)
+        side = self._normalize_side(signal_row.get("confirmed_signal", signal_row.get("side", "")))
+        family = self._setup_family(signal_row)
+        if side not in {"BUY", "SELL"}:
+            return {"sample": 0, "win_rate": None, "expectancy": None, "blocked": False, "reason": "no_side"}
+
+        system_col = history.get("system", pd.Series("", index=history.index)).astype(str).str.upper()
+        side_col = history.get("side", pd.Series("", index=history.index)).astype(str).str.upper()
+
+        same_system_side = history[(system_col.eq(system)) & (side_col.eq(side))]
+        same_comment_col = same_system_side.get("comment", pd.Series("", index=same_system_side.index)).astype(str).str.upper()
+        same_family = same_system_side[same_comment_col.str.contains(family, na=False)] if family else same_system_side.iloc[0:0]
+
+        exact_stats = self._performance_stats(same_family)
+        side_stats = self._performance_stats(same_system_side)
+        selected = exact_stats if exact_stats["sample"] >= 8 else side_stats
+        context = "setup" if exact_stats["sample"] >= 8 else "side"
+
+        blocked = False
+        reason = ""
+        if selected["sample"] >= 8:
+            weak_win_rate = selected["win_rate"] < 40.0
+            negative_expectancy = selected["expectancy"] <= 0.0
+            poor_profit_factor = selected["profit_factor"] < 0.90
+            if weak_win_rate and (negative_expectancy or poor_profit_factor):
+                blocked = True
+                reason = (
+                    f"broker_{context}_{system}_{side}_{family}_weak "
+                    f"wr={selected['win_rate']:.0f}% exp={selected['expectancy']:.2f} n={selected['sample']}"
+                )
+
+        return {
+            "system": system,
+            "side": side,
+            "setup_family": family,
+            "context": context,
+            "sample": selected["sample"],
+            "win_rate": selected["win_rate"],
+            "expectancy": selected["expectancy"],
+            "profit_factor": selected["profit_factor"],
+            "blocked": blocked,
+            "reason": reason,
+        }
+
+    def _load_broker_history(self) -> pd.DataFrame:
+        if not self.broker_history_path.exists():
+            return pd.DataFrame()
+        try:
+            mtime = self.broker_history_path.stat().st_mtime
+            if self._broker_history_cache is not None and self._broker_history_mtime == mtime:
+                return self._broker_history_cache
+
+            df = pd.read_csv(self.broker_history_path, on_bad_lines="skip", low_memory=False)
+            if df.empty or "pnl" not in df.columns:
+                self._broker_history_cache = pd.DataFrame()
+            else:
+                df["pnl"] = pd.to_numeric(df["pnl"], errors="coerce").fillna(0.0)
+                if "result" not in df.columns:
+                    df["result"] = np.where(df["pnl"] > 0, "WIN", np.where(df["pnl"] < 0, "LOSS", "BREAKEVEN"))
+                self._broker_history_cache = df[df["pnl"].ne(0.0)].copy()
+            self._broker_history_mtime = mtime
+            return self._broker_history_cache
+        except Exception as exc:
+            logger.warning("Broker context performance load failed: %s", exc)
+            return pd.DataFrame()
+
+    def _performance_stats(self, df: pd.DataFrame) -> dict:
+        if df.empty:
+            return {"sample": 0, "win_rate": 0.0, "expectancy": 0.0, "profit_factor": 1.0}
+        pnl = pd.to_numeric(df["pnl"], errors="coerce").fillna(0.0)
+        wins = int((pnl > 0).sum())
+        sample = int(len(pnl))
+        gross_profit = float(pnl[pnl > 0].sum())
+        gross_loss = float(abs(pnl[pnl < 0].sum()))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else (2.0 if gross_profit > 0 else 1.0)
+        return {
+            "sample": sample,
+            "win_rate": (wins / sample * 100.0) if sample else 0.0,
+            "expectancy": float(pnl.mean()) if sample else 0.0,
+            "profit_factor": profit_factor,
+        }
+
+    def _signal_system(self, signal_row: dict) -> str:
+        signal = str(signal_row.get("signal", "")).upper()
+        flow_type = str(signal_row.get("flow_trade_type", "NONE")).upper()
+        return "FLOW_EXP" if signal == "FLOW" or flow_type != "NONE" else "ALPHA"
+
+    def _normalize_side(self, value) -> str:
+        side = str(value or "").strip().upper()
+        return {"LONG": "BUY", "SHORT": "SELL"}.get(side, side)
+
+    def _setup_family(self, signal_row: dict) -> str:
+        flow_type = str(signal_row.get("flow_trade_type", "NONE")).upper()
+        if flow_type in {"MOMENTUM_CONTINUATION", "NONE"}:
+            return "MOM"
+        if flow_type == "MICRO_RETRACEMENT_REENTRY":
+            return "REEN"
+        if flow_type == "DEEP_PULLBACK_SCALP":
+            return "DPB"
+        if flow_type == "STRUCTURE_RETEST_CONTINUATION":
+            return "SRT"
+        if flow_type == "ZONE_REVERSAL_REJECTION":
+            return "ZRR"
+        if flow_type == "EXHAUSTION_FADE":
+            return "EXH"
+        if flow_type == "EARLY_REVERSAL_ENTRY":
+            return "REV"
+        return "FLOW"
     
     def record_outcome(self, signal_row: dict, pnl: float):
         """

@@ -44,11 +44,36 @@ class TrailingStopManager:
         
         actions = []
         for pos in positions:
+            if not self._is_managed_position(pos):
+                continue
             action = self._evaluate_position(pos)
             if action:
                 actions.append(action)
         
         return actions
+
+    def _is_managed_position(self, position) -> bool:
+        if self.config is None:
+            return True
+        configured_symbol = str(getattr(self.config.market, "symbol", "") or "").upper()
+        position_symbol = str(getattr(position, "symbol", "") or "").upper()
+        comment = str(getattr(position, "comment", "") or "").upper()
+        magic = getattr(position, "magic", None)
+        system_magic = int(getattr(self.config.market, "magic_number", 202404))
+
+        symbol_match = (
+            configured_symbol
+            and (
+                configured_symbol == position_symbol
+                or configured_symbol in position_symbol
+                or (configured_symbol in {"XAUUSD", "GOLD"} and ("XAU" in position_symbol or "GOLD" in position_symbol))
+            )
+        )
+        try:
+            magic_match = magic is not None and int(magic) == system_magic
+        except (TypeError, ValueError):
+            magic_match = False
+        return bool(symbol_match and (comment.startswith("AQ_") or magic_match))
     
     def _evaluate_position(self, position) -> dict:
         """

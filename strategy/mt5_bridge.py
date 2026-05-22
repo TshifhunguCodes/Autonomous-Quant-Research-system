@@ -70,9 +70,38 @@ class MT5Bridge:
         logger.info("✅ MT5 Bridge connected to DEMO account: %s", acc_info.login)
         return True
 
+    def _is_system_position(self, position) -> bool:
+        """Return True only for AQRS positions on this system's configured market."""
+        configured_symbol = str(getattr(self.config.market, "symbol", "") or "").upper()
+        position_symbol = str(getattr(position, "symbol", "") or "").upper()
+        comment = str(getattr(position, "comment", "") or "").upper()
+        magic = getattr(position, "magic", None)
+        system_magic = int(getattr(self.config.market, "magic_number", 202404))
+
+        symbol_match = (
+            configured_symbol
+            and (
+                configured_symbol == position_symbol
+                or configured_symbol in position_symbol
+                or (configured_symbol in {"XAUUSD", "GOLD"} and ("XAU" in position_symbol or "GOLD" in position_symbol))
+            )
+        )
+        try:
+            magic_match = magic is not None and int(magic) == system_magic
+        except (TypeError, ValueError):
+            magic_match = False
+        system_tag_match = comment.startswith("AQ_") or magic_match
+        return bool(symbol_match and system_tag_match)
+
+    def get_system_positions(self, symbol: str | None = None):
+        positions = mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
+        if not positions:
+            return []
+        return [position for position in positions if self._is_system_position(position)]
+
     def is_candle_already_traded(self, symbol, candle_time, allow_overlap=False):
         """Checks active positions to prevent double execution on the same bar."""
-        positions = mt5.positions_get(symbol=symbol)
+        positions = self.get_system_positions(symbol=symbol)
         if not positions:
             return False, ""
 
@@ -122,9 +151,9 @@ class MT5Bridge:
     def check_simultaneous_positions(self):
         """Checks if the maximum number of simultaneous positions has been reached."""
         max_pos = getattr(self.config.risk, "max_simultaneous_positions", 3)
-        positions = mt5.positions_total()
-        if positions >= max_pos:
-            logger.warning("🚫 Max positions reached: %d", positions)
+        positions = self.get_system_positions()
+        if len(positions) >= max_pos:
+            logger.warning("AQRS max positions reached: %d", len(positions))
             return False
         return True
 

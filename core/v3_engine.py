@@ -64,6 +64,7 @@ class AQRSV3Engine:
         pipeline = self.behavior.classify_market(df)
         pipeline = self.structure.build_price_action_structure(pipeline)
         pipeline = self.zone.build_zones(pipeline)
+        pipeline = self.structure._classify_market_story(pipeline)
         pipeline = self.lifecycle.classify_lifecycle(pipeline)
         pipeline = self.liquidity.classify_liquidity(pipeline)
         
