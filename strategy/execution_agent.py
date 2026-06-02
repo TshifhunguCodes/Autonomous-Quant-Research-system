@@ -384,6 +384,12 @@ def _build_order_comment(system, signal):
     quality = str(signal.get("quality", "NA"))[:5]
     if system != "FLOW_EXP":
         return f"AQ_{system}_{quality}"
+    try:
+        visual_zone_score = float(signal.get("visual_zone_score", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        visual_zone_score = 0.0
+    if visual_zone_score >= 78:
+        return f"AQ_FLOW_EXP_VZ_{quality}"
     flow_code = {
         "MOMENTUM_CONTINUATION": "MOM",
         "MICRO_RETRACEMENT_REENTRY": "REENT",

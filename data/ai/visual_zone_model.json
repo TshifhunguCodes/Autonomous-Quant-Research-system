@@ -1,0 +1,68 @@
+{
+  "version": "1.0",
+  "trained_at": "2026-06-02T09:59:21.712355+00:00",
+  "samples": 788,
+  "labeled_samples": 63,
+  "zones": 14,
+  "side_profiles": {
+    "BUY": {
+      "samples": 3,
+      "preferred_hours": [
+        16,
+        4,
+        5
+      ],
+      "feature_mean": {
+        "body_ratio": 0.666925,
+        "upper_wick_ratio": 0.054278,
+        "lower_wick_ratio": 0.278796,
+        "momentum": -24.72,
+        "range_position_20": 0.092415,
+        "atr14": 22.834286,
+        "hour": 8.333333
+      },
+      "feature_std": {
+        "body_ratio": 0.261719,
+        "upper_wick_ratio": 0.052319,
+        "lower_wick_ratio": 0.292409,
+        "momentum": 15.940082,
+        "range_position_20": 0.073143,
+        "atr14": 0.950632,
+        "hour": 5.436502
+      },
+      "price_zone_low_mean": 4450.421,
+      "price_zone_high_mean": 4474.891
+    },
+    "SELL": {
+      "samples": 60,
+      "preferred_hours": [
+        16,
+        17,
+        8,
+        10,
+        12,
+        13
+      ],
+      "feature_mean": {
+        "body_ratio": 0.499871,
+        "upper_wick_ratio": 0.232042,
+        "lower_wick_ratio": 0.268086,
+        "momentum": -3.242333,
+        "range_position_20": 0.516775,
+        "atr14": 18.999095,
+        "hour": 13.133333
+      },
+      "feature_std": {
+        "body_ratio": 0.272794,
+        "upper_wick_ratio": 0.191642,
+        "lower_wick_ratio": 0.192527,
+        "momentum": 19.209776,
+        "range_position_20": 0.294728,
+        "atr14": 4.138353,
+        "hour": 5.965084
+      },
+      "price_zone_low_mean": 4692.152,
+      "price_zone_high_mean": 4716.513
+    }
+  }
+}

@@ -254,6 +254,9 @@ class RetrainPipeline:
                     "spread",
                     "slippage",
                     "setup",
+                    "visual_zone_score",
+                    "visual_zone_direction",
+                    "visual_zone_type",
                 ]
                 if c in audit.columns
             ]

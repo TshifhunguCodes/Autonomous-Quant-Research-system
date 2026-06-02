@@ -1,1 +1,1 @@
-{"total_trades_seen": 95, "wins": 34, "losses": 61, "epsilon": 0.13732861863744006, "learning_rate": 0.1, "discount_factor": 0.95}
+{"total_trades_seen": 110, "wins": 38, "losses": 72, "epsilon": 0.12738176517877567, "learning_rate": 0.1, "discount_factor": 0.95}

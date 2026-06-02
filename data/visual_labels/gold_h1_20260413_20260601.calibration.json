@@ -1,0 +1,15 @@
+{
+  "screenshot_id": "gold_h1_20260413_20260601",
+  "symbol": "XAUUSD",
+  "timeframe": "H1",
+  "timezone": "broker",
+  "x_axis_mode": "calendar",
+  "plot_left_x": 216,
+  "plot_right_x": 1745,
+  "price_top_y": 14,
+  "price_bottom_y": 735,
+  "price_top": 4883.62,
+  "price_bottom": 4406.77,
+  "visible_start": "2026-04-13 17:00:00",
+  "visible_end": "2026-06-01 16:00:00"
+}

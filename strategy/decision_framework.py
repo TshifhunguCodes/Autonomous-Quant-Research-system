@@ -112,6 +112,7 @@ def should_enter_reversal_trade(context: Mapping[str, Any]) -> str:
     choch = _bool(context, "choch")
     bos = _bool(context, "bos")
     sweep = _bool(context, "liquidity_sweep") or str(_get(context, "liquidity_event", "")) == "CONFIRMED_SWEEP_REJECTION"
+    trap_reversal = _float(context, "trap_reversal_score", 0.0) >= 55
     retest = _bool(context, "wick_rejection") or _bool(context, "break_retest")
     retracement = _float(context, "fib_retracement_pct", 0.0)
     htf_lifecycle = str(_get(context, "htf_lifecycle", "UNKNOWN")).upper()
@@ -119,6 +120,8 @@ def should_enter_reversal_trade(context: Mapping[str, Any]) -> str:
 
     if choch and not bos and retracement >= 50 and retracement <= 78.6 and retest:
         return "EARLY_WARNING"
+    if trap_reversal and retest:
+        return "CONFIRMED_REVERSAL"
     if choch and bos and sweep and retest and (htf_lifecycle in {"REVERSAL_WATCH", "UNKNOWN"} or htf_bias in {"NEUTRAL", "RANGING"}):
         return "CONFIRMED_REVERSAL"
     return "NOT_YET"
@@ -128,6 +131,7 @@ def should_enter_counter_trend_trade(context: Mapping[str, Any]) -> str:
     lifecycle = str(_get(context, "lifecycle_state", "")).upper()
     retracement = _float(context, "fib_retracement_pct", 0.0)
     sweep = _bool(context, "liquidity_sweep") or str(_get(context, "liquidity_event", "")) == "CONFIRMED_SWEEP_REJECTION"
+    trap_reversal = _float(context, "trap_reversal_score", 0.0) >= 55
     htf_bias = str(_get(context, "htf_bias", "NEUTRAL")).upper()
     rejection = _bool(context, "wick_rejection") or _bool(context, "order_block") or _bool(context, "fvg_zone")
     flow_open = int(_float(context, "flow_open_trades", 0.0))
@@ -138,7 +142,7 @@ def should_enter_counter_trend_trade(context: Mapping[str, Any]) -> str:
         return "BLOCKED"
     if htf_bias in {"BULLISH_STRONG", "BEARISH_STRONG"}:
         return "BLOCKED"
-    if (lifecycle == "TREND_EXHAUSTING" or retracement > 78.6) and sweep and htf_bias in {"NEUTRAL", "RANGING", "REVERSAL_WATCH"} and rejection:
+    if (lifecycle == "TREND_EXHAUSTING" or retracement > 78.6 or trap_reversal) and (sweep or trap_reversal) and htf_bias in {"NEUTRAL", "RANGING", "REVERSAL_WATCH"} and rejection:
         return "ALLOWED"
     return "BLOCKED"
 

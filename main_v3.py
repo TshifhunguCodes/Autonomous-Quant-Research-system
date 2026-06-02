@@ -12,6 +12,7 @@ from config.v3_config import V3Config
 from core.config import load_config
 from core.v3_engine import AQRSV3Engine
 from strategy import execution_agent
+from strategy.backtesting import run_backtest_frame
 from core.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -96,13 +97,82 @@ def run_backtest_mode(args, engine):
 
     alpha_count = len(result[result["signal"] == "ALPHA"])
     flow_count = len(result[result["signal"] == "FLOW"])
+    trades_df, execution_summary = run_backtest_frame(result, engine.config, label="COMBINED", mode="COMBINED")
+    backtest_dir = get_backtest_dir_path(engine.config)
+    backtest_dir.mkdir(parents=True, exist_ok=True)
+    trades_path = backtest_dir / "v3_executed_trades.csv"
+    summary_path = backtest_dir / "v3_execution_summary.csv"
+    session_path = backtest_dir / "v3_session_performance.csv"
+    trades_df.to_csv(trades_path, index=False)
+    execution_summary.to_csv(summary_path, index=False)
+    session_summary = _build_session_summary(trades_df)
+    session_summary.to_csv(session_path, index=False)
+
     print(f"\n{'=' * 40}")
     print(f"V3 BACKTEST SUMMARY ({len(result):,} candles)")
     print(f"{'=' * 40}")
     print(f"Total ALPHA Signals: {alpha_count}")
     print(f"Total FLOW Signals:  {flow_count}")
     print(f"Total Opportunities: {alpha_count + flow_count}")
+    print("-" * 40)
+    if execution_summary.empty:
+        print("No executed trade summary generated.")
+    else:
+        row = execution_summary.iloc[0]
+        print(f"Trades Taken:       {int(row.get('closed_trades', 0))}")
+        print(f"Wins:               {int(row.get('wins', 0))}")
+        print(f"Losses:             {int(row.get('losses', 0))}")
+        print(f"Open Trades:        {int(row.get('open_trades', 0))}")
+        print(f"Win Rate:           {float(row.get('true_win_rate_pct', 0.0)):.2f}%")
+        print(f"Profit Factor:      {float(row.get('profit_factor', 0.0)):.2f}")
+        print(f"Net PnL:            {float(row.get('net_pnl', 0.0)):.2f}")
+        print(f"Max Drawdown:       {float(row.get('max_drawdown_pct', 0.0)):.2f}%")
+        print(f"Trades Per Day:     {float(row.get('trades_per_day', 0.0)):.2f}")
+    if not session_summary.empty:
+        print("-" * 40)
+        print("SESSION PERFORMANCE")
+        print(session_summary.to_string(index=False))
+    print("-" * 40)
+    print(f"Executed trades: {trades_path}")
+    print(f"Summary CSV:     {summary_path}")
+    print(f"Session CSV:     {session_path}")
     print(f"{'=' * 40}\n")
+
+
+def _build_session_summary(trades_df):
+    if trades_df.empty or "session" not in trades_df.columns:
+        return pd.DataFrame(
+            columns=["session", "trades", "wins", "losses", "breakevens", "win_rate_pct", "net_pnl", "profit_factor"]
+        )
+    closed = trades_df[trades_df["result"].isin(["WIN", "LOSS", "BE"])].copy()
+    if closed.empty:
+        return pd.DataFrame(
+            columns=["session", "trades", "wins", "losses", "breakevens", "win_rate_pct", "net_pnl", "profit_factor"]
+        )
+
+    rows = []
+    for session, group in closed.groupby("session", dropna=False):
+        wins = int((group["result"] == "WIN").sum())
+        losses = int((group["result"] == "LOSS").sum())
+        breakevens = int((group["result"] == "BE").sum())
+        pnl = pd.to_numeric(group["pnl"], errors="coerce").fillna(0.0)
+        gross_profit = float(pnl[pnl > 0].sum())
+        gross_loss = float(abs(pnl[pnl < 0].sum()))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else (2.0 if gross_profit > 0 else 0.0)
+        decided = wins + losses
+        rows.append(
+            {
+                "session": session,
+                "trades": int(len(group)),
+                "wins": wins,
+                "losses": losses,
+                "breakevens": breakevens,
+                "win_rate_pct": round((wins / decided * 100.0) if decided else 0.0, 2),
+                "net_pnl": round(float(pnl.sum()), 2),
+                "profit_factor": round(profit_factor, 2),
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["net_pnl", "trades"], ascending=[False, False])
 
 
 def run_replay_mode(args, engine):

@@ -1,0 +1,15 @@
+screenshot_id,annotation_id,side,x_center,y_center,x_radius,y_radius,confidence,notes
+gold_h1_20260413_20260601,sell_001,SELL,280,44,18,25,0.70,approx cyan sell zone near chart high
+gold_h1_20260413_20260601,sell_002,SELL,318,100,15,15,0.65,approx cyan sell continuation
+gold_h1_20260413_20260601,sell_003,SELL,399,189,20,14,0.70,approx cyan sell zone
+gold_h1_20260413_20260601,sell_004,SELL,500,235,20,22,0.70,approx cyan sell zone
+gold_h1_20260413_20260601,sell_005,SELL,654,384,18,16,0.65,approx cyan sell zone
+gold_h1_20260413_20260601,sell_006,SELL,722,363,18,10,0.65,approx cyan sell zone
+gold_h1_20260413_20260601,sell_007,SELL,880,221,16,25,0.65,approx cyan sell spike zone
+gold_h1_20260413_20260601,sell_008,SELL,980,211,28,17,0.70,approx cyan sell zone
+gold_h1_20260413_20260601,sell_009,SELL,1104,273,22,14,0.65,approx cyan sell zone
+gold_h1_20260413_20260601,sell_010,SELL,1228,464,35,13,0.65,approx cyan sell zone
+gold_h1_20260413_20260601,sell_011,SELL,1426,480,34,14,0.65,approx cyan sell zone
+gold_h1_20260413_20260601,sell_012,SELL,1636,457,38,36,0.60,approx cyan sell zone
+gold_h1_20260413_20260601,buy_001,BUY,770,579,48,24,0.75,approx red buy zone
+gold_h1_20260413_20260601,buy_002,BUY,1568,735,50,26,0.75,approx red buy zone

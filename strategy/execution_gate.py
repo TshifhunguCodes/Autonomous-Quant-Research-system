@@ -165,19 +165,27 @@ class ExecutionGate:
                     and multi_tf_alignment_score >= 45
                     and htf_exhaustion < 80
                 )
-                counter_story_ok = ExecutionGate._deep_pullback_countertrend_ok(signal) or ExecutionGate._story_countertrend_ok(signal)
-                if flow_direction == "BUY" and not h1_bullish and not (local_buy_continuation or counter_story_ok):
+                local_exception = (
+                    ExecutionGate._deep_pullback_countertrend_ok(signal)
+                    or ExecutionGate._story_countertrend_ok(signal)
+                    or ExecutionGate._range_reversion_ok(signal)
+                    or ExecutionGate._trap_reversal_ok(signal)
+                )
+                if flow_direction == "BUY" and not h1_bullish and not (local_buy_continuation or local_exception):
                     return False, "FLOW_EXP", 0, "FLOW_H1_MISALIGNMENT", True
-                if flow_direction == "SELL" and h1_bullish and not (local_sell_continuation or counter_story_ok):
+                if flow_direction == "SELL" and h1_bullish and not (local_sell_continuation or local_exception):
                     return False, "FLOW_EXP", 0, "FLOW_H1_MISALIGNMENT", True
             
             # Momentum confirmation (RSI filter)
             rsi = float(signal.get("rsi14", 50.0))
             indicator_score = ExecutionGate._floatish(signal.get("flow_indicator_score", 60.0), 60.0)
+            zone_indicator_score = ExecutionGate._floatish(signal.get("zone_indicator_score", 0.0), 0.0)
             if flow_direction == "BUY" and rsi < (30 if flow_trade_type == "DEEP_PULLBACK_SCALP" else 40):
                 return False, "FLOW_EXP", 0, "FLOW_RSI_TOO_WEAK_BUY", True
             if flow_direction == "SELL" and rsi > (70 if flow_trade_type == "DEEP_PULLBACK_SCALP" else 60):
                 return False, "FLOW_EXP", 0, "FLOW_RSI_TOO_WEAK_SELL", True
+            if ExecutionGate._truthy(signal.get("zone_indicator_conflict", 0)) and zone_indicator_score < 55:
+                return False, "FLOW_EXP", 0, "FLOW_ZONE_INDICATOR_CONFLICT", True
             
             # Volume confirmation
             volume_avg = float(signal.get("volume_avg_20", 1.0) or 1.0)
@@ -197,10 +205,12 @@ class ExecutionGate:
             priority_score = (
                 framework_score * 0.35 + 
                 trend_alignment * 100 * 0.25 + 
-                indicator_score * 0.20 +
+                max(indicator_score, zone_indicator_score) * 0.20 +
                 momentum_score * 0.1 + 
                 volume_score * 0.1
             )
+            if ExecutionGate._range_reversion_ok(signal):
+                priority_score += 15
             
             # Dynamic threshold based on remaining daily trades
             remaining = flow_tracker.get_remaining_trades()
@@ -217,7 +227,12 @@ class ExecutionGate:
                 (state == "TREND_UP" and direction == "SELL")
                 or (state == "TREND_DOWN" and direction == "BUY")
             )
-            if flow_counter_trend and should_enter_counter_trend_trade(signal) != "ALLOWED" and not (ExecutionGate._deep_pullback_countertrend_ok(signal) or ExecutionGate._story_countertrend_ok(signal)):
+            if flow_counter_trend and should_enter_counter_trend_trade(signal) != "ALLOWED" and not (
+                ExecutionGate._deep_pullback_countertrend_ok(signal)
+                or ExecutionGate._story_countertrend_ok(signal)
+                or ExecutionGate._range_reversion_ok(signal)
+                or ExecutionGate._trap_reversal_ok(signal)
+            ):
                 return False, "FLOW_EXP", 0, "FLOW_COUNTER_TREND_BLOCKED", True
             # Apply smart monitor lot multiplier
             lot_multiplier = getattr(config.regime, "flow_risk_multiplier", 0.5) * 0.5
@@ -526,7 +541,12 @@ class ExecutionGate:
         bos = ExecutionGate._truthy(signal.get("bos", 0))
         liquidity_sweep = ExecutionGate._truthy(signal.get("liquidity_sweep", 0)) or str(signal.get("liquidity_event", "")) == "CONFIRMED_SWEEP_REJECTION"
         counter_type = flow_type in {"EXHAUSTION_FADE", "EARLY_REVERSAL_ENTRY", "ZONE_REVERSAL_REJECTION"}
-        counter_story_exception = ExecutionGate._deep_pullback_countertrend_ok(signal) or ExecutionGate._story_countertrend_ok(signal)
+        counter_story_exception = (
+            ExecutionGate._deep_pullback_countertrend_ok(signal)
+            or ExecutionGate._story_countertrend_ok(signal)
+            or ExecutionGate._range_reversion_ok(signal)
+            or ExecutionGate._trap_reversal_ok(signal)
+        )
 
         bullish_pattern = ExecutionGate._truthy(signal.get("bullish_reversal", 0)) or ExecutionGate._floatish(signal.get("bullish_pattern_score", 0)) > 0
         bearish_pattern = ExecutionGate._truthy(signal.get("bearish_reversal", 0)) or ExecutionGate._floatish(signal.get("bearish_pattern_score", 0)) > 0
@@ -537,6 +557,7 @@ class ExecutionGate:
 
         flow_type = str(signal.get("flow_trade_type", "NONE")).upper()
         is_flow = str(signal.get("signal", "")).upper() == "FLOW" or flow_type != "NONE"
+        flow_counter_trend_allowed = ExecutionGate._truthy(signal.get("flow_counter_trend_allowed", 0))
         local_continuation = flow_type in {"MOMENTUM_CONTINUATION", "MICRO_RETRACEMENT_REENTRY", "STRUCTURE_RETEST_CONTINUATION", "NONE"}
         flow_local_buy_exception = (
             is_flow
@@ -557,9 +578,9 @@ class ExecutionGate:
             and ExecutionGate._floatish(signal.get("htf_exhaustion", 50.0), 50.0) < 80
         )
 
-        if htf_bias == "BULLISH" and direction == "SELL" and not (reversal_exception or flow_local_sell_exception or counter_story_exception):
+        if htf_bias == "BULLISH" and direction == "SELL" and not (reversal_exception or flow_local_sell_exception or counter_story_exception or (is_flow and flow_counter_trend_allowed)):
             return False, "HTF_BULLISH_SELL_BLOCK"
-        if htf_bias == "BEARISH" and direction == "BUY" and not (reversal_exception or flow_local_buy_exception or counter_story_exception):
+        if htf_bias == "BEARISH" and direction == "BUY" and not (reversal_exception or flow_local_buy_exception or counter_story_exception or (is_flow and flow_counter_trend_allowed)):
             return False, "HTF_BEARISH_BUY_BLOCK"
         if state == "TREND_UP" and direction == "SELL" and not (reversal_exception or counter_story_exception):
             return False, "TREND_UP_SELL_BLOCK"
@@ -596,13 +617,17 @@ class ExecutionGate:
         if direction not in {"BUY", "SELL"}:
             return False, "FLOW_INDICATOR_NO_DIRECTION"
 
-        indicator_score = ExecutionGate._floatish(signal.get("flow_indicator_score", 60.0), 60.0)
+        indicator_score = max(
+            ExecutionGate._floatish(signal.get("flow_indicator_score", 60.0), 60.0),
+            ExecutionGate._floatish(signal.get("zone_indicator_score", 0.0), 0.0),
+        )
         indicator_conflict = ExecutionGate._truthy(signal.get("flow_indicator_conflict", 0))
+        zone_indicator_conflict = ExecutionGate._truthy(signal.get("zone_indicator_conflict", 0))
         continuation_type = flow_type in {"NONE", "MOMENTUM_CONTINUATION", "MICRO_RETRACEMENT_REENTRY", "STRUCTURE_RETEST_CONTINUATION"}
         confirmed_reversal = ExecutionGate._truthy(signal.get("confirmed_reversal", 0))
         choch = ExecutionGate._truthy(signal.get("choch", 0))
 
-        if indicator_conflict and not (ExecutionGate._story_countertrend_ok(signal) or (not continuation_type and confirmed_reversal and choch)):
+        if (indicator_conflict or zone_indicator_conflict) and indicator_score < 55 and not (ExecutionGate._story_countertrend_ok(signal) or ExecutionGate._trap_reversal_ok(signal) or (not continuation_type and confirmed_reversal and choch)):
             return False, "FLOW_INDICATOR_CONFLICT_BLOCK"
         if continuation_type and indicator_score < 40:
             return False, f"FLOW_INDICATOR_CONFIRMATION_LOW ({indicator_score:.0f} < 40)"
@@ -634,7 +659,10 @@ class ExecutionGate:
             return False
 
         retracement = ExecutionGate._floatish(signal.get("fib_retracement_pct", 0.0), 0.0)
-        indicator_score = ExecutionGate._floatish(signal.get("flow_indicator_score", 0.0), 0.0)
+        indicator_score = max(
+            ExecutionGate._floatish(signal.get("flow_indicator_score", 0.0), 0.0),
+            ExecutionGate._floatish(signal.get("zone_indicator_score", 0.0), 0.0),
+        )
         rsi = ExecutionGate._floatish(signal.get("rsi14", 50.0), 50.0)
         has_reaction = (
             ExecutionGate._truthy(signal.get("wick_rejection", 0))
@@ -664,14 +692,75 @@ class ExecutionGate:
                 ExecutionGate._truthy(signal.get("bullish_zone_rejection", 0))
                 or "TRIPLE_BOTTOM" in story
                 or "REVERSAL_FROM_ZONE" in story
+                or ExecutionGate._trap_reversal_ok(signal)
             )
         if direction == "SELL":
             return state == "TREND_UP" and story.startswith("BEARISH") and (
                 ExecutionGate._truthy(signal.get("bearish_zone_rejection", 0))
                 or "TRIPLE_TOP" in story
                 or "REVERSAL_FROM_ZONE" in story
+                or ExecutionGate._trap_reversal_ok(signal)
             )
         return False
+
+    @staticmethod
+    def _trap_reversal_ok(signal):
+        direction = str(signal.get("confirmed_signal", "")).upper()
+        trap_direction = str(signal.get("trap_reversal_direction", "NEUTRAL")).upper()
+        trap_score = ExecutionGate._floatish(signal.get("trap_reversal_score", 0.0), 0.0)
+        visual_score = ExecutionGate._floatish(signal.get("visual_zone_score", 0.0), 0.0)
+        zone_score = ExecutionGate._floatish(signal.get("zone_indicator_score", 0.0), 0.0)
+        if direction == "BUY":
+            expected = "LONG"
+        elif direction == "SELL":
+            expected = "SHORT"
+        else:
+            return False
+        return bool(
+            trap_direction == expected
+            and trap_score >= 55
+            and max(visual_score, zone_score) >= 55
+            and str(signal.get("flow_trade_type", "NONE")).upper() == "ZONE_REVERSAL_REJECTION"
+        )
+
+    @staticmethod
+    def _range_reversion_ok(signal):
+        direction = str(signal.get("confirmed_signal", "")).upper()
+        if direction not in {"BUY", "SELL"}:
+            return False
+
+        state = str(signal.get("market_state", signal.get("market_regime", signal.get("behavior_label", "UNKNOWN")))).upper()
+        if state not in {"RANGE", "CHOPPY"}:
+            return False
+
+        indicator_score = max(
+            ExecutionGate._floatish(signal.get("flow_indicator_score", 0.0), 0.0),
+            ExecutionGate._floatish(signal.get("zone_indicator_score", 0.0), 0.0),
+        )
+        story_confidence = ExecutionGate._floatish(signal.get("story_confidence", 0.0), 0.0)
+        confirm_score = ExecutionGate._floatish(signal.get("confirm_score", signal.get("flow_score", 0.0)), 0.0)
+        if max(indicator_score, story_confidence, confirm_score) < 55:
+            return False
+
+        bullish_reaction = (
+            ExecutionGate._truthy(signal.get("bullish_zone_rejection", 0))
+            or ExecutionGate._truthy(signal.get("bullish_reversal", 0))
+            or ExecutionGate._floatish(signal.get("bullish_pattern_score", 0.0), 0.0) > 0
+            or ExecutionGate._truthy(signal.get("demand_zone", 0))
+            or ExecutionGate._truthy(signal.get("is_support", 0))
+            or str(signal.get("market_story", "")).upper().startswith("BULLISH")
+        )
+        bearish_reaction = (
+            ExecutionGate._truthy(signal.get("bearish_zone_rejection", 0))
+            or ExecutionGate._truthy(signal.get("bearish_reversal", 0))
+            or ExecutionGate._floatish(signal.get("bearish_pattern_score", 0.0), 0.0) > 0
+            or ExecutionGate._truthy(signal.get("supply_zone", 0))
+            or ExecutionGate._truthy(signal.get("is_resistance", 0))
+            or str(signal.get("market_story", "")).upper().startswith("BEARISH")
+        )
+        if direction == "BUY":
+            return bullish_reaction
+        return bearish_reaction
 
     @staticmethod
     def apply_adaptive_learning(config, signal):

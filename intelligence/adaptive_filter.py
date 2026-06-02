@@ -319,6 +319,12 @@ class AdaptiveFilter:
         return {"LONG": "BUY", "SHORT": "SELL"}.get(side, side)
 
     def _setup_family(self, signal_row: dict) -> str:
+        try:
+            visual_zone_score = float(signal_row.get("visual_zone_score", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            visual_zone_score = 0.0
+        if visual_zone_score >= 78:
+            return "VZ"
         flow_type = str(signal_row.get("flow_trade_type", "NONE")).upper()
         if flow_type in {"MOMENTUM_CONTINUATION", "NONE"}:
             return "MOM"
@@ -371,6 +377,8 @@ class AdaptiveFilter:
             "confirmed_signal": signal_row.get("confirmed_signal", signal_row.get("side", "")),
             "htf_bias": signal_row.get("htf_bias", signal_row.get("h1_bias", "NEUTRAL")),
             "flow_trade_type": signal_row.get("flow_trade_type", "NONE"),
+            "visual_zone_score": signal_row.get("visual_zone_score", 0),
+            "visual_zone_direction": signal_row.get("visual_zone_direction", "NEUTRAL"),
             "session": signal_row.get("session", "UNKNOWN"),
             "pnl": pnl,
         }

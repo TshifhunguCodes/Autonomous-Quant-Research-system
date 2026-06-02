@@ -74,8 +74,25 @@ class RLAgent:
         direction = self._normalize_direction(signal_row.get("confirmed_signal", signal_row.get("direction", "")))
         htf_bias = self._normalize_bias(signal_row.get("htf_bias", signal_row.get("h1_bias", "NEUTRAL")))
         aligned = self._alignment_bucket(direction, htf_bias, market_state)
+        try:
+            visual_zone_score = float(signal_row.get("visual_zone_score", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            visual_zone_score = 0.0
         setup_type = str(signal_row.get("flow_trade_type", signal_row.get("signal", "NONE"))).upper()
-        if setup_type not in {"MOMENTUM_CONTINUATION", "MICRO_RETRACEMENT_REENTRY", "EXHAUSTION_FADE", "EARLY_REVERSAL_ENTRY", "ALPHA", "FLOW"}:
+        if visual_zone_score >= 78:
+            setup_type = "VISUAL_ZONE"
+        if setup_type not in {
+            "MOMENTUM_CONTINUATION",
+            "MICRO_RETRACEMENT_REENTRY",
+            "DEEP_PULLBACK_SCALP",
+            "STRUCTURE_RETEST_CONTINUATION",
+            "ZONE_REVERSAL_REJECTION",
+            "EXHAUSTION_FADE",
+            "EARLY_REVERSAL_ENTRY",
+            "VISUAL_ZONE",
+            "ALPHA",
+            "FLOW",
+        }:
             setup_type = "OTHER"
         session = str(signal_row.get("session", "UNKNOWN")).upper()
         if session not in {"LONDON", "NEW_YORK", "ASIAN", "EUROPEAN", "US", "UNKNOWN"}:
@@ -265,6 +282,7 @@ class RLAgent:
             "confirmed_signal": outcome_row.get("confirmed_signal", outcome_row.get("side", "")),
             "htf_bias": outcome_row.get("htf_bias", "NEUTRAL"),
             "flow_trade_type": outcome_row.get("flow_trade_type", "NONE"),
+            "visual_zone_score": outcome_row.get("visual_zone_score", 0),
             "session": outcome_row.get("session", "UNKNOWN"),
         }
         

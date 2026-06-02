@@ -32,6 +32,10 @@ AUDIT_COLUMNS = [
     "deal_ticket",
     "pnl",
     "comment",
+    "visual_zone_score",
+    "visual_zone_direction",
+    "visual_zone_type",
+    "visual_zone_reason",
 ]
 
 class MT5Bridge:
@@ -301,6 +305,10 @@ class MT5Bridge:
                     "session": trade.get("session", "UNKNOWN"),
                     "setup": trade.get("setup", "NONE"),
                     "comment": trade.get("comment", ""),
+                    "visual_zone_score": trade.get("visual_zone_score", 0),
+                    "visual_zone_direction": trade.get("visual_zone_direction", "NEUTRAL"),
+                    "visual_zone_type": trade.get("visual_zone_type", "NONE"),
+                    "visual_zone_reason": trade.get("visual_zone_reason", ""),
                 })
 
             if new_outcomes:
@@ -365,7 +373,7 @@ class MT5Bridge:
         df = pd.DataFrame(rows, columns=AUDIT_COLUMNS)
         for col in ["time", "signal_time"]:
             df[col] = pd.to_datetime(df[col], errors="coerce")
-        for col in ["alpha_score", "flow_score", "lot", "price", "spread", "slippage", "pnl"]:
+        for col in ["alpha_score", "flow_score", "lot", "price", "spread", "slippage", "pnl", "visual_zone_score"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         return df
 
@@ -457,7 +465,11 @@ class MT5Bridge:
             "order_ticket": getattr(result, "order", 0),
             "deal_ticket": getattr(result, "deal", 0),
             "pnl": 0.0,
-            "comment": request["comment"]
+            "comment": request["comment"],
+            "visual_zone_score": metadata.get("visual_zone_score", 0),
+            "visual_zone_direction": metadata.get("visual_zone_direction", "NEUTRAL"),
+            "visual_zone_type": metadata.get("visual_zone_type", "NONE"),
+            "visual_zone_reason": metadata.get("visual_zone_reason", ""),
         }
         
         self._log_to_csv(log_entry)
@@ -502,7 +514,11 @@ class MT5Bridge:
             "order_ticket": 0,
             "deal_ticket": 0,
             "pnl": 0.0,
-            "comment": ""
+            "comment": "",
+            "visual_zone_score": metadata.get("visual_zone_score", 0),
+            "visual_zone_direction": metadata.get("visual_zone_direction", "NEUTRAL"),
+            "visual_zone_type": metadata.get("visual_zone_type", "NONE"),
+            "visual_zone_reason": metadata.get("visual_zone_reason", ""),
         }
         self._log_to_csv(log_entry)
         logger.warning("🚫 Trade Blocked: %s", reason)

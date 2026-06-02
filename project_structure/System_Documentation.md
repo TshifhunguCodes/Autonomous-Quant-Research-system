@@ -228,6 +228,40 @@ The Replay Engine (`--mode replay`) is used for forensic debugging. It simulates
 
 ---
 
+## 10. Screenshot-Based Visual Zone Training
+
+Annotated MT5 screenshots can be converted into supervised visual-zone labels. The screenshot is used only to define the intended entry zones; OHLCV candles are still extracted from local MT5 history.
+
+1. Save chart calibration in `data/visual_labels/*.calibration.json`.
+   - `plot_left_x` / `plot_right_x`: x-pixels for the first and last visible time anchors. If MT5 shows blank future space after the latest candle, use the last time label/candle area, not the far-right chart border.
+   - `price_top_y` / `price_bottom_y`: two known y-pixels from the price scale.
+   - `price_top` / `price_bottom`: prices shown at those y-pixels.
+   - `visible_start` / `visible_end`: first and last visible chart times.
+2. Save circle annotations in `data/visual_labels/*.annotations.csv`.
+   - `side=BUY` for red demand/buy circles.
+   - `side=SELL` for blue/cyan supply/sell circles.
+   - `x_center`, `y_center`, `x_radius`, and `y_radius` are screenshot pixel measurements.
+3. Run the extractor:
+
+```powershell
+python -m intelligence.visual_zone_dataset `
+  --calibration data\visual_labels\gold_h1_20260413_20260601.calibration.json `
+  --annotations data\visual_labels\gold_h1_20260413_20260601.annotations.csv `
+  --candles data\raw\xauusd_h1.csv `
+  --out-zones data\visual_labels\gold_h1_20260413_20260601.zones.csv `
+  --out-labels data\visual_labels\gold_h1_20260413_20260601.candle_labels.csv `
+  --model-out data\ai\visual_zone_model.json
+```
+
+Outputs:
+- `*.zones.csv`: converted BUY/SELL zones with actual candle times and price ranges.
+- `*.candle_labels.csv`: candle dataset for the visible chart range, labeled `BUY`, `SELL`, or `NONE`.
+- `data/ai/visual_zone_model.json`: lightweight profile learned from annotated zones.
+
+Before training from a screenshot, ensure local H1/M5 data covers the full visible screenshot range. For the current gold screenshot, the chart spans `2026-04-13 17:00:00` to `2026-06-01 16:00:00`.
+
+---
+
 ## 11. V3 Phase 1 Summary
 
 AQRS V3 introduces a professional, modular autonomous trading system with dual intelligence engines (ALPHA and FLOW). Key enhancements include:
